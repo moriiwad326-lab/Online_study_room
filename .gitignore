@@ -1,4 +1,4 @@
 .venv/
-LoC/tools/input/*
-LoC/tools/output/*
+LoC/tools/input/
+LoC/tools/output/
 LoC/tools/venv/
