@@ -81,13 +81,40 @@ hands = HandsClass(
     min_tracking_confidence=0.7     # 追跡信頼度
 )
 
-cap = cv2.VideoCapture(0)   # カメラのID指定
-if cap.isOpened():
+
+def open_camera():
+    backends = [
+        ("DirectShow", cv2.CAP_DSHOW),
+        ("Media Foundation", cv2.CAP_MSMF),
+        ("Auto", cv2.CAP_ANY),
+    ]
+
+    for name, backend in backends:
+        cap = cv2.VideoCapture(0, backend)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            print(f"Camera opened with {name} backend")
+            return cap
+        cap.release()
+
+    return None
+
+
+cap = open_camera()  # カメラのID指定
+if cap is None:
+    print("カメラを起動できませんでした。USB カメラが接続されているか、他のアプリが使用していないか確認してください。")
+    raise SystemExit(1)
+
+try:
     while True:
         # カメラから画像取得
         success, img = cap.read()
-        if not success:
+        if not success or img is None:
             continue
+
         img = cv2.flip(img, 1)          # 画像を左右反転
         img_h, img_w, _ = img.shape     # サイズ取得
 
@@ -121,7 +148,7 @@ if cap.isOpened():
                 # - テキスト情報を作成
                 hand_texts = []
                 for c_id, hand_class in enumerate(results.multi_handedness[h_id].classification):
-                    hand_texts.append("#%d-%d" % (h_id, c_id)) 
+                    hand_texts.append("#%d-%d" % (h_id, c_id))
                     hand_texts.append("- Index:%d" % (hand_class.index))
                     hand_texts.append("- Label:%s" % (hand_class.label))
                     hand_texts.append("- Score:%3.2f" % (hand_class.score * 100))
@@ -140,5 +167,6 @@ if cap.isOpened():
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q') or key == ord('Q') or key == 0x1b:
             break
-
-cap.release()
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
