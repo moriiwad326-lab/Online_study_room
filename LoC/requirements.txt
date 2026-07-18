@@ -1,1 +1,3 @@
 opencv-python>=4.5.5
+mediapipe>=0.10.21
+numpy

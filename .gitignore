@@ -2,3 +2,7 @@
 LoC/tools/input/
 LoC/tools/output/
 LoC/tools/venv/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
