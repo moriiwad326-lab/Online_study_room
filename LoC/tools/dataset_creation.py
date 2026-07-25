@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -86,6 +87,11 @@ def run_pipeline(
             simulate=simulate,
         )
         frame_output_dir = Path(config["frame_output_dir"])
+        if frame_output_dir.exists():
+            # Remove any frames/labels left over from a previous run (e.g. at a
+            # different --rate) so stale files don't get mixed in with the new
+            # extraction and inflate the LoC pass with duplicate frames.
+            shutil.rmtree(frame_output_dir)
         frame_output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Processing {video_path} -> {frame_output_dir} (every {rate_seconds}s)")

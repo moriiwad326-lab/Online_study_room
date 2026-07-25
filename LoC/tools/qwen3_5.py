@@ -1,7 +1,18 @@
 from typing import List, Optional
+import io
 import re
 import json
 from ollama import chat
+from PIL import Image
+
+# Longest side (px) images are downscaled to before being sent to the model.
+# qwen3.5's vision encoder uses dynamic resolution: prompt token count (and
+# thus latency) scales roughly with pixel count. Source frames can be 4K,
+# which balloons a single window (e.g. 5-20 images) to tens of thousands of
+# tokens. 768px is plenty of detail for this coarse posture/behavior
+# classification task while keeping per-image cost small.
+IMAGE_MAX_SIDE = 768
+IMAGE_JPEG_QUALITY = 85
 
 system_prompt = """あなたは勉強中の手元動画から集中度を判定する専門AIです。
 出力は必ずJSON形式のみで行ってください。マークダウンの装飾(```jsonなど)も不要です。
@@ -82,6 +93,23 @@ def _parse_level_from_json(text: str) -> Optional[int]:
     return None
 
 
+def _resize_image_bytes(image_path: str, max_side: int = IMAGE_MAX_SIDE) -> bytes:
+    """Downscale an image so its longest side is at most `max_side` and
+    return it as in-memory JPEG bytes. Avoids writing resized copies to disk
+    and avoids sending full-resolution (e.g. 4K) source frames to the model.
+    """
+    with Image.open(image_path) as im:
+        im = im.convert('RGB')
+        width, height = im.size
+        scale = max_side / max(width, height)
+        if scale < 1:
+            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            im = im.resize(new_size, Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format='JPEG', quality=IMAGE_JPEG_QUALITY)
+        return buf.getvalue()
+
+
 def evaluate_loc(user_prompt_text: str, image_paths: List[str], model: str = 'qwen3.5:9b') -> int:
     """
     Call Ollama chat model with a fixed system prompt and a user prompt.
@@ -89,52 +117,30 @@ def evaluate_loc(user_prompt_text: str, image_paths: List[str], model: str = 'qw
     - `image_paths`: list of image file paths to attach to the user message.
     Returns the concentration level as an integer in 1..5.
     """
+    images = [_resize_image_bytes(p) for p in image_paths]
     messages = [
         {'role': 'system', 'content': system_prompt},
-        {'role': 'user', 'content': user_prompt_text, 'images': image_paths},
+        {'role': 'user', 'content': user_prompt_text, 'images': images},
     ]
 
     response = chat(
         model=model,
         messages=messages,
         format="json",
+        think=False,  # this is a rule-based classification task; the prompt's
+                      # step-by-step instructions already do the reasoning, and
+                      # qwen3.5's extended thinking traces add ~10x latency for
+                      # no measurable accuracy gain here.
         options={
-            "num_ctx": 2**16,
+            "num_ctx": 16384,
             "temperature": 0.1,
             "top_p": 0.9,
-            "num_predict": -1,
-        },keep_alive=True
+            "num_predict": 200,
+        },
+        keep_alive=True,
     )
 
-    # coerce response to text for parsing
-    text = ''
-    try:
-        if isinstance(response, str):
-            text = response
-        elif isinstance(response, dict):
-            for k in ('content', 'text', 'response', 'result'):
-                if k in response and isinstance(response[k], str):
-                    text = response[k]
-                    break
-            if not text and 'choices' in response and isinstance(response['choices'], list):
-                first = response['choices'][0]
-                if isinstance(first, dict):
-                    for k in ('message', 'text', 'content'):
-                        if k in first and isinstance(first[k], str):
-                            text = first[k]
-                            break
-            if not text:
-                text = str(response)
-        else:
-            if hasattr(response, 'content'):
-                text = response.content
-            elif hasattr(response, 'text'):
-                text = response.text
-            else:
-                text = str(response)
-    except Exception:
-        text = str(response)
-
+    text = response.message.content or ''
     level = _parse_level_from_json(text)
     if level is None:
         raise ValueError(f"Could not parse concentration level from JSON response: {text!r}")
