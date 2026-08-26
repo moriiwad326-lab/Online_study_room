@@ -5,7 +5,7 @@ This project includes a small script to extract images from study videos at regu
 Usage:
 
 ```bash
-python tools/convert_image_from_video.py <input_path> --output output --rate 1
+python tools/convert_frame_from_video.py <input_path> --output output --rate 1
 ```
 
 - `<input_path>`: path to a single video file (e.g. `input/input_video.mp4`) or a directory containing videos.
