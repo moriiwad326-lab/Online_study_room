@@ -1,10 +1,17 @@
 """Compute LoC (concentration) for frames in a folder using qwen3_5.
 
 This script scans an input directory for image frames, calls
-`qwen3_5.evaluate_loc` with up to `--window` frames of context
-(default 10) for each frame (the last image in the window is the
-target), and writes `labels.csv` into the input directory containing
-two columns: `frame` and `LoC` (1-5 integer or -1 when failed).
+`qwen3_5.evaluate_loc` with `--window` frames of context (default 20)
+for each frame (the last image in the window is the target), and writes
+`labels.csv` into the input directory containing two columns: `frame`
+and `LoC` (1-5 integer or -1 when failed).
+
+The first `window - 1` frames cannot be given a full context window, so
+by default they are skipped entirely and never appear in the CSV. The
+prompt is written around a multi-frame history ("if the first frame
+shows phone use, the level does not recover"), which a truncated window
+cannot express, so those labels are not comparable to the rest. Pass
+`--keep-warmup` to label them anyway with whatever context exists.
 
 Usage:
   python convert_LoC_from_frame.py /path/to/frames_dir [--csv labels.csv]
@@ -57,13 +64,21 @@ def extract_frame_number(filename: str) -> Optional[int]:
 
 
 def compute_loc_for_images(input_dir: str, files: Sequence[str], window: int = DEFAULT_WINDOW,
-						   model: Optional[str] = None, simulate: bool = False) -> List[Tuple[int, Optional[int]]]:
+						   model: Optional[str] = None, simulate: bool = False,
+						   skip_warmup: bool = True) -> List[Tuple[int, Optional[int]]]:
 	"""Compute LoC for each image.
+
+	When `skip_warmup` is True (default) the leading frames that cannot be
+	given a full context window are not evaluated at all and are absent from
+	the returned list.
 
 	Returns a list of tuples (frame_number, level_or_None).
 	"""
 	results: List[Tuple[int, Optional[int]]] = []
 	effective_window = max(1, min(window, DEFAULT_WINDOW))
+	first_index = effective_window - 1 if skip_warmup else 0
+	if skip_warmup and first_index:
+		logging.info(f"Skipping the first {first_index} frame(s) with an incomplete context window")
 
 	qwen = None
 	user_prompt = None
@@ -84,7 +99,15 @@ def compute_loc_for_images(input_dir: str, files: Sequence[str], window: int = D
 			raise RuntimeError(f'Failed to import qwen3_5 module: {exc}') from exc
 
 	total = len(files)
-	for idx, fname in enumerate(files):
+	if first_index >= total:
+		logging.warning(
+			f"Only {total} frame(s) available but {effective_window} are needed for a full "
+			f"context window; no labels produced"
+		)
+		return results
+
+	for idx in range(first_index, total):
+		fname = files[idx]
 		start = max(0, idx - effective_window + 1)
 		window_files = files[start: idx + 1]
 		abs_paths = [os.path.abspath(os.path.join(input_dir, f)) for f in window_files]
@@ -121,9 +144,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description='Compute LoC (concentration) for frames in a folder using qwen3_5.')
 	parser.add_argument('input_dir', help='Directory containing frame images')
 	parser.add_argument('--csv', '-o', default=None, help='Output CSV filename (defaults to labels.csv in input directory)')
-	parser.add_argument('--window', '-w', type=int, default=DEFAULT_WINDOW, help='Number of frames to include as context (default 4 to stay within Ollama context limits)')
+	parser.add_argument('--window', '-w', type=int, default=DEFAULT_WINDOW,
+						help=f'Number of frames to include as context (default {DEFAULT_WINDOW}, also the maximum)')
 	parser.add_argument('--model', '-m', default=None, help='Model name to pass to qwen3_5.evaluate_loc')
 	parser.add_argument('--simulate', action='store_true', help='Simulate outputs without calling qwen3_5 (for testing)')
+	parser.add_argument('--keep-warmup', action='store_true',
+						help='Also label the leading frames that have an incomplete context window (skipped by default)')
 	args = parser.parse_args(argv)
 
 	input_dir = args.input_dir
@@ -136,7 +162,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	logging.info(f"Found {len(files)} images in {input_dir!r}. Window={args.window}. Output CSV: {output_csv!r}")
 
-	rows = compute_loc_for_images(input_dir, files, window=args.window, model=args.model, simulate=args.simulate)
+	rows = compute_loc_for_images(input_dir, files, window=args.window, model=args.model,
+								  simulate=args.simulate, skip_warmup=not args.keep_warmup)
 
 	write_labels_csv(output_csv, rows)
 	logging.info(f"Wrote {len(rows)} rows to {output_csv!r}")

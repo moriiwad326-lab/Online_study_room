@@ -2,7 +2,9 @@
 
 This script orchestrates the existing tools:
 1. Split input videos into frame images at a fixed interval.
-2. Run LoC evaluation over the extracted frames using qwen3_5.
+2. Run LoC evaluation over the extracted frames using qwen3_5. The leading
+   frames without a full context window are skipped (see
+   convert_LoC_from_frame); pass --keep-warmup to label them anyway.
 3. Save the resulting labels CSV next to the extracted frames.
 
 Example:
@@ -32,6 +34,7 @@ def build_pipeline_config(
     window: int = 20,
     model: Optional[str] = None,
     simulate: bool = False,
+    skip_warmup: bool = True,
 ) -> dict[str, object]:
     """Create a configuration dictionary for a single video pipeline."""
     video_path = Path(input_path).expanduser().resolve()
@@ -45,6 +48,7 @@ def build_pipeline_config(
         "window": window,
         "model": model,
         "simulate": simulate,
+        "skip_warmup": skip_warmup,
     }
 
 
@@ -68,6 +72,7 @@ def run_pipeline(
     window: int = 20,
     model: Optional[str] = None,
     simulate: bool = False,
+    skip_warmup: bool = True,
 ) -> List[dict[str, object]]:
     """Process one or more videos and create frame images and LoC labels."""
     input_path_obj = Path(input_path).expanduser().resolve()
@@ -85,6 +90,7 @@ def run_pipeline(
             window=window,
             model=model,
             simulate=simulate,
+            skip_warmup=skip_warmup,
         )
         frame_output_dir = Path(config["frame_output_dir"])
         if frame_output_dir.exists():
@@ -101,7 +107,11 @@ def run_pipeline(
             continue
 
         image_files = list_image_files(str(frame_output_dir))
-        rows = compute_loc_for_images(str(frame_output_dir), image_files, window=window, model=model, simulate=simulate)
+        rows = compute_loc_for_images(str(frame_output_dir), image_files, window=window, model=model,
+                                      simulate=simulate, skip_warmup=skip_warmup)
+        if not rows:
+            print(f"No LoC labels produced for {video_path} (too few frames for a full context window)")
+            continue
         write_labels_csv(str(Path(config["labels_csv"])), rows)
 
         print(f"Saved {len(saved_frames)} frames and {len(rows)} LoC labels to {frame_output_dir}")
@@ -118,6 +128,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--window", "-w", type=int, default=20, help="Context window for LoC evaluation")
     parser.add_argument("--model", "-m", default=None, help="Model name for qwen3_5.evaluate_loc")
     parser.add_argument("--simulate", action="store_true", help="Simulate LoC outputs without calling qwen")
+    parser.add_argument("--keep-warmup", action="store_true",
+                        help="Also label the leading frames that have an incomplete context window (skipped by default)")
     args = parser.parse_args(argv)
 
     try:
@@ -128,6 +140,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             window=args.window,
             model=args.model,
             simulate=args.simulate,
+            skip_warmup=not args.keep_warmup,
         )
     except Exception as exc:
         print(f"Pipeline failed: {exc}", file=sys.stderr)
