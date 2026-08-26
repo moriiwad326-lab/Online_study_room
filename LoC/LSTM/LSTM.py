@@ -2,26 +2,33 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-# 乱数シードの固定（再現性のため）
-torch.manual_seed(42)
-np.random.seed(42)
 
 # ==========================================
 # 1. ダミーデータの作成（サイン波）
 # ==========================================
-# 0から100までの範囲で1000個のデータポイントを作成
-data = np.sin(np.linspace(0, 100, 1000))
+def make_sine_dataset(seq_length: int = 20, num_points: int = 1000):
+    """サイン波から (X, Y) のダミー系列データを作る（PoC用）。
 
-seq_length = 20  # 過去20ステップのデータを見て、次の1ステップを予測する
+    LoCモデル（`core.py`）から `SimpleLSTM` を import した際に乱数シードの固定や
+    ダミーデータ生成が副作用として走らないよう、関数の中に閉じてある。
+    """
+    # 乱数シードの固定（再現性のため）
+    torch.manual_seed(42)
+    np.random.seed(42)
 
-X, Y = [], []
-for i in range(len(data) - seq_length):
-    X.append(data[i : i + seq_length])
-    Y.append(data[i + seq_length])
+    # 0から100までの範囲で num_points 個のデータポイントを作成
+    data = np.sin(np.linspace(0, 100, num_points))
 
-# PyTorchのLSTMは入力を (バッチサイズ, シーケンス長, 入力特徴量数) にする必要がある
-X = torch.tensor(X, dtype=torch.float32).unsqueeze(-1) # 形: (980, 20, 1)
-Y = torch.tensor(Y, dtype=torch.float32).unsqueeze(-1) # 形: (980, 1)
+    X, Y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i : i + seq_length])
+        Y.append(data[i + seq_length])
+
+    # PyTorchのLSTMは入力を (バッチサイズ, シーケンス長, 入力特徴量数) にする必要がある
+    X = torch.tensor(np.array(X), dtype=torch.float32).unsqueeze(-1)  # 形: (980, 20, 1)
+    Y = torch.tensor(np.array(Y), dtype=torch.float32).unsqueeze(-1)  # 形: (980, 1)
+    return X, Y
+
 
 # ==========================================
 # 2. LSTMモデルの定義

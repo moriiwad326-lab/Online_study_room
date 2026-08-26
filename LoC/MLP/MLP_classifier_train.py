@@ -1,4 +1,4 @@
-from MLP_classifier import input_size, hidden_size, num_classes
+from MLP_classifier import input_size, hidden_sizes, num_classes, dropout
 from MLP_classifier import MLP_classifier as mlp
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ X_train = torch.randn(100, input_size)
 y_train = torch.randint(0, num_classes, (100,))
 
 # モデルのインスタンス化
-model = mlp(input_size, hidden_size, num_classes)
+model = mlp(input_size, hidden_sizes, num_classes, dropout)
 
 # 損失関数: 交差エントロピー誤差（分類問題によく使用されます）
 criterion = nn.CrossEntropyLoss()

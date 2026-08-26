@@ -1,7 +1,9 @@
-from LSTM import SimpleLSTM, input_size, hidden_size, num_layers, output_size
+from LSTM import SimpleLSTM, make_sine_dataset, input_size, hidden_size, num_layers, output_size
 import torch
 import torch.nn as nn
 import numpy as np
+
+X, Y = make_sine_dataset(seq_length=20)
 
 model = SimpleLSTM(input_size, hidden_size, num_layers, output_size)
 

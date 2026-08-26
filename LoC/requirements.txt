@@ -1,3 +1,15 @@
+# データ作成 / 特徴抽出（tools/, MediaPipe_Hands/）
 opencv-python>=4.5.5
 mediapipe>=0.10.21
 numpy
+
+# モデル本体（core.py, train.py, infer.py）と ConvNeXt 特徴抽出
+torch>=2.0
+transformers>=4.40
+pillow
+
+# 集中度の自動ラベリング（tools/qwen3_5.py）。別途 Ollama 本体と qwen3.5 の pull が必要
+ollama>=0.3
+
+# テスト
+pytest
