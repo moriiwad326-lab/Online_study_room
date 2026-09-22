@@ -22,6 +22,10 @@
 「設計上の意思決定」を参照。
 """
 import argparse
+import contextlib
+import os
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -57,6 +61,55 @@ _HAND_SLOT = {"Left": 0, "Right": 1}
 
 # 手が潰れて写った場合に相対座標が発散しないための下限
 _MIN_SCALE = 1e-3
+
+# MediaPipe のネイティブ層が stderr に直接書き出す、無害だが毎回出るログ。
+# いずれも MediaPipe 内蔵グラフの仕様によるもので呼び出し側では解消できない：
+#   - XNNPACK デリゲートの生成通知（INFO）
+#   - absl のログ初期化前に出力した旨の注意書き
+#   - inference_feedback_manager: 単一シグネチャでないモデルでのフィードバック無効化
+#   - landmark_projection_calculator: 正方形でない ROI に対する NORM_RECT の警告
+# これらは C++ 側の absl ログなので `GLOG_minloglevel` 等の環境変数では止まらない。
+# ファイルディスクリプタ 2 を差し替えて捕捉し、既知のものだけを落とす。
+_BENIGN_NATIVE_LOGS = (
+    "Created TensorFlow Lite XNNPACK delegate",
+    "All log messages before absl::InitializeLog",
+    "inference_feedback_manager.cc",
+    "landmark_projection_calculator.cc",
+)
+
+
+@contextlib.contextmanager
+def _filter_native_stderr(buffer):
+    """ブロック中の fd 2 への出力を捕捉し、既知の無害なログ以外を stderr に流し直す。
+
+    未知のエラーまで握り潰さないよう、フィルタに一致しない行はそのまま出力する。
+
+    Args:
+        buffer: 書き込み先の一時ファイル（`fileno()` を持つ、シーク可能なもの）。
+    """
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    buffer.seek(0)
+    buffer.truncate()
+    os.dup2(buffer.fileno(), 2)
+    try:
+        yield
+    finally:
+        # ネイティブ層は fd に直接書くのでフラッシュ不要だが、
+        # ブロック内で Python 側が stderr へ書いていた場合に備える
+        sys.stderr.flush()
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+
+        buffer.seek(0)
+        captured = buffer.read().decode("utf-8", errors="replace")
+        passthrough = [
+            line
+            for line in captured.splitlines()
+            if line.strip() and not any(known in line for known in _BENIGN_NATIVE_LOGS)
+        ]
+        if passthrough:
+            sys.stderr.write("\n".join(passthrough) + "\n")
 
 # フレーム間差分を取る対象（静的ブロック内のインデックス）。
 # 手首の絶対位置(x, y) → 手全体の移動、指先の相対座標 → 指の動き。
@@ -147,12 +200,19 @@ class HandFeatureExtractor:
         min_tracking_confidence: float = 0.7,
         static_image_mode: bool = False,
     ):
-        self._hands = mp.solutions.hands.Hands(
-            static_image_mode=static_image_mode,
-            max_num_hands=max_num_hands,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
+        # ネイティブログのフィルタ用。フレームごとに作り直さず使い回す
+        self._stderr_buffer = tempfile.TemporaryFile()
+        with _filter_native_stderr(self._stderr_buffer):
+            self._hands = mp.solutions.hands.Hands(
+                static_image_mode=static_image_mode,
+                max_num_hands=max_num_hands,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+            # 推論グラフの初期化は `Hands()` ではなく最初の `process()` で走り、
+            # 初期化ログもそこで出る。これを同じ捕捉ブロック内に閉じ込めるため、
+            # ダミー画像で1回だけ空打ちしておく（手は写っていないので状態は残らない）。
+            self._hands.process(np.zeros((64, 64, 3), dtype=np.uint8))
         self._previous_static: Optional[np.ndarray] = None
 
     def reset(self):
@@ -169,7 +229,8 @@ class HandFeatureExtractor:
         aspect = (width / height) if height else 1.0
 
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        results = self._hands.process(rgb)
+        with _filter_native_stderr(self._stderr_buffer):
+            results = self._hands.process(rgb)
 
         static = np.zeros((NUM_HANDS, STATIC_DIM), dtype=np.float32)
         if results.multi_hand_landmarks and results.multi_handedness:
@@ -192,7 +253,9 @@ class HandFeatureExtractor:
         return features
 
     def close(self):
-        self._hands.close()
+        with _filter_native_stderr(self._stderr_buffer):
+            self._hands.close()
+        self._stderr_buffer.close()
 
     def __enter__(self):
         return self
