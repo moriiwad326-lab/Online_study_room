@@ -41,7 +41,11 @@ class ImageFeatureExtractor:
         from transformers import AutoImageProcessor, ConvNextModel
 
         self._torch = torch
-        self.device = torch.device(device) if device else torch.device("cpu")
+        # device 未指定なら GPU を優先する。ConvNeXt の forward がこのモジュール最大の
+        # 計算コストなので、既定が CPU のままだと特徴抽出が数倍遅くなる。
+        self.device = torch.device(device) if device else torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
         self.processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
         self.model = ConvNextModel.from_pretrained(model_name)
         self.model.eval().to(self.device)
@@ -57,8 +61,10 @@ class ImageFeatureExtractor:
         if len(images_bgr) == 0:
             return np.zeros((0, IMAGE_FEATURE_DIM), dtype=np.float32)
 
-        # OpenCV は BGR、画像プロセッサは RGB を期待する
-        rgb_images = [image[:, :, ::-1] for image in images_bgr]
+        # OpenCV は BGR、画像プロセッサは RGB を期待する。
+        # `[:, :, ::-1]` はストライドが負のビューになり torch.from_numpy が受け付けない
+        # ため、連続メモリにコピーしてから渡す。
+        rgb_images = [np.ascontiguousarray(image[:, :, ::-1]) for image in images_bgr]
         inputs = self.processor(images=rgb_images, return_tensors="pt").to(self.device)
 
         with self._torch.no_grad():

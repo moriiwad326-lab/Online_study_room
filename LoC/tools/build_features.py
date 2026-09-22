@@ -85,7 +85,14 @@ def build_features_for_dir(
     image_features: List[np.ndarray] = []
     batch: List[np.ndarray] = []
 
+    # 4Kフレーム1枚あたり約0.2秒かかり、完了まで無言だと停止と区別がつかないので
+    # 定期的に進捗を流す（パイプ経由でも遅れないよう flush する）
+    total = len(files)
+    progress_every = max(1, total // 20)
+
     for index, filename in enumerate(files):
+        if index % progress_every == 0:
+            print(f"  {index}/{total} フレーム", flush=True)
         image_path = frame_dir / filename
         image_bgr = cv2.imread(str(image_path))
         if image_bgr is None:
@@ -115,7 +122,12 @@ def build_features_for_dir(
     }
 
 
-def run(input_path: str | Path, batch_size: int = 16, overwrite: bool = True) -> List[Path]:
+def run(
+    input_path: str | Path,
+    batch_size: int = 16,
+    overwrite: bool = True,
+    device: Optional[str] = None,
+) -> List[Path]:
     """入力配下の各動画ディレクトリに features.npz を書き出す。"""
     input_path_obj = Path(input_path).expanduser().resolve()
     frame_dirs = iter_frame_dirs(input_path_obj)
@@ -123,7 +135,9 @@ def run(input_path: str | Path, batch_size: int = 16, overwrite: bool = True) ->
         raise FileNotFoundError(f"フレーム画像を含むディレクトリが見つかりません: {input_path_obj}")
 
     written: List[Path] = []
-    with ImageFeatureExtractor() as image_extractor, HandFeatureExtractor() as hand_extractor:
+    # MediaPipe Hands は CPU 実行のみなので device を渡すのは ConvNeXt 側だけ
+    with ImageFeatureExtractor(device=device) as image_extractor, \n            HandFeatureExtractor() as hand_extractor:
+        print(f"ConvNeXt device: {image_extractor.device}")
         for frame_dir in frame_dirs:
             output_path = frame_dir / FEATURES_FILENAME
             if output_path.exists() and not overwrite:
@@ -153,9 +167,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--batch-size", "-b", type=int, default=16, help="ConvNeXt のバッチサイズ")
     parser.add_argument("--skip-existing", action="store_true",
                         help="features.npz が既にあるディレクトリを飛ばす")
+    parser.add_argument("--device", default=None, help="cpu / cuda（既定は自動判定）")
     args = parser.parse_args(argv)
 
-    written = run(args.input, batch_size=args.batch_size, overwrite=not args.skip_existing)
+    written = run(args.input, batch_size=args.batch_size,
+                  overwrite=not args.skip_existing, device=args.device)
     print(f"{len(written)} 件の features.npz を書き出しました "
           f"(image_dim={IMAGE_FEATURE_DIM}, hand_dim={HAND_FEATURE_DIM})")
     return 0

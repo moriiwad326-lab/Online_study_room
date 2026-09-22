@@ -5,6 +5,7 @@ numpy
 
 # モデル本体（core.py, train.py, infer.py）と ConvNeXt 特徴抽出
 torch>=2.0
+torchvision  # transformers v5 の AutoImageProcessor(use_fast=True) に必須
 transformers>=4.40
 pillow
 
