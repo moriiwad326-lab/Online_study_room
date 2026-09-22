@@ -1,0 +1,157 @@
+{
+  "_comment": "Onsta のモックデータ。時刻は「何分前 / 何日前」という相対値で持ち、読み込み時に実時刻へ変換する（いつ開いても自然に見えるようにするため）。",
+
+  "me": {
+    "id": "u_me",
+    "name": "モリイ",
+    "handle": "@morii",
+    "initial": "モ",
+    "avatarColor": "#5b5bd6",
+    "bio": "現役受験生。数学と物理を重点的にやっています。Onsta で集中度を見える化して、ダラダラ時間を減らすのが目標。",
+    "gender": "非公開",
+    "birthYear": 2008,
+    "prefecture": "東京都",
+    "grade": "高校3年生",
+    "targetSchool": "国立大学 理工系",
+    "tags": ["理系", "数学", "物理", "共通テスト", "朝活"],
+    "examDate": "2027-01-16",
+    "examName": "共通テスト",
+    "weeklyGoalMinutes": 1800
+  },
+
+  "subjects": [
+    { "id": "math",      "name": "数学",   "color": "#5b5bd6" },
+    { "id": "physics",   "name": "物理",   "color": "#2d9cdb" },
+    { "id": "chemistry", "name": "化学",   "color": "#27ae60" },
+    { "id": "english",   "name": "英語",   "color": "#e8724c" },
+    { "id": "japanese",  "name": "国語",   "color": "#eb5a8c" },
+    { "id": "social",    "name": "社会",   "color": "#f2994a" },
+    { "id": "info",      "name": "情報",   "color": "#8e6fe0" }
+  ],
+
+  "materials": [
+    { "id": "m01", "subjectId": "math",      "title": "青チャート数学I+A" },
+    { "id": "m02", "subjectId": "math",      "title": "1対1対応の演習 数学II" },
+    { "id": "m03", "subjectId": "math",      "title": "共通テスト過去問 数学" },
+    { "id": "m04", "subjectId": "physics",   "title": "物理のエッセンス 力学・波動" },
+    { "id": "m05", "subjectId": "physics",   "title": "良問の風 物理" },
+    { "id": "m06", "subjectId": "chemistry", "title": "化学重要問題集" },
+    { "id": "m07", "subjectId": "chemistry", "title": "無機化学まとめノート" },
+    { "id": "m08", "subjectId": "english",   "title": "システム英単語" },
+    { "id": "m09", "subjectId": "english",   "title": "英文解釈の技術100" },
+    { "id": "m10", "subjectId": "japanese",  "title": "古文単語ゴロ315" },
+    { "id": "m11", "subjectId": "japanese",  "title": "現代文キーワード読解" },
+    { "id": "m12", "subjectId": "social",    "title": "共通テスト 地理B 対策" },
+    { "id": "m13", "subjectId": "info",      "title": "情報I 実践問題集" }
+  ],
+
+  "liveUsers": [
+    { "id": "u01", "name": "ハルカ",   "initial": "ハ", "avatarColor": "#e8724c", "materialId": "m08", "elapsedSec": 2760, "loc": 82 },
+    { "id": "u02", "name": "ケイタ",   "initial": "ケ", "avatarColor": "#2d9cdb", "materialId": "m04", "elapsedSec": 1145, "loc": 64 },
+    { "id": "u03", "name": "みなみ",   "initial": "み", "avatarColor": "#27ae60", "materialId": "m06", "elapsedSec": 5320, "loc": 91 },
+    { "id": "u04", "name": "そうた",   "initial": "そ", "avatarColor": "#eb5a8c", "materialId": "m10", "elapsedSec": 430,  "loc": 38 },
+    { "id": "u05", "name": "Rin",      "initial": "R",  "avatarColor": "#8e6fe0", "materialId": "m02", "elapsedSec": 3980, "loc": 71 },
+    { "id": "u06", "name": "たくみ",   "initial": "た", "avatarColor": "#f2994a", "materialId": "m12", "elapsedSec": 760,  "loc": 55 }
+  ],
+
+  "posts": [
+    {
+      "id": "p01", "userId": "u03", "userName": "みなみ", "initial": "み", "avatarColor": "#27ae60",
+      "minutesAgo": 24, "materialId": "m06", "durationMin": 95,
+      "memo": "有機の構造決定がようやく手が止まらなくなってきた。あと2周。",
+      "likes": 12, "comments": 3, "liked": false,
+      "avgLoc": 78,
+      "locSeries": [62, 70, 74, 81, 85, 88, 84, 79, 72, 80, 86, 83, 77, 74, 81]
+    },
+    {
+      "id": "p02", "userId": "u01", "userName": "ハルカ", "initial": "ハ", "avatarColor": "#e8724c",
+      "minutesAgo": 68, "materialId": "m09", "durationMin": 50,
+      "memo": "",
+      "likes": 6, "comments": 0, "liked": true,
+      "avgLoc": 64,
+      "locSeries": [48, 55, 62, 68, 71, 66, 59, 63, 70, 74, 68, 61, 58, 66, 69]
+    },
+    {
+      "id": "p03", "userId": "u05", "userName": "Rin", "initial": "R", "avatarColor": "#8e6fe0",
+      "minutesAgo": 145, "materialId": "m02", "durationMin": 120,
+      "memo": "微積の融合問題。途中で眠くなったのがLoCに出てて笑った。",
+      "likes": 21, "comments": 5, "liked": false,
+      "avgLoc": 59,
+      "locSeries": [72, 78, 75, 68, 60, 52, 41, 35, 38, 47, 55, 63, 69, 72, 66]
+    },
+    {
+      "id": "p04", "userId": "u02", "userName": "ケイタ", "initial": "ケ", "avatarColor": "#2d9cdb",
+      "minutesAgo": 260, "materialId": "m05", "durationMin": 70,
+      "memo": "電磁気の導入だけ。明日ちゃんとやる。",
+      "likes": 4, "comments": 1, "liked": false,
+      "avgLoc": 71,
+      "locSeries": [58, 66, 72, 77, 80, 76, 71, 68, 73, 78, 74, 69, 72, 75, 70]
+    },
+    {
+      "id": "p05", "userId": "u04", "userName": "そうた", "initial": "そ", "avatarColor": "#eb5a8c",
+      "minutesAgo": 400, "materialId": "m10", "durationMin": 35,
+      "memo": "",
+      "likes": 9, "comments": 2, "liked": false,
+      "avgLoc": 45,
+      "locSeries": [38, 42, 50, 47, 39, 33, 41, 52, 55, 48, 40, 44, 51, 46, 43]
+    },
+    {
+      "id": "p06", "userId": "u06", "userName": "たくみ", "initial": "た", "avatarColor": "#f2994a",
+      "minutesAgo": 610, "materialId": "m12", "durationMin": 60,
+      "memo": "気候区分の暗記。集中できた日は記録見るのが楽しい。",
+      "likes": 15, "comments": 4, "liked": false,
+      "avgLoc": 83,
+      "locSeries": [70, 79, 85, 88, 90, 86, 82, 84, 87, 89, 85, 80, 83, 86, 88]
+    }
+  ],
+
+  "goalPosts": [
+    {
+      "id": "g01", "userId": "u05", "userName": "Rin", "initial": "R", "avatarColor": "#8e6fe0",
+      "minutesAgo": 90, "goal": "今週：数学II の微積を1周する", "progress": 62
+    },
+    {
+      "id": "g02", "userId": "u01", "userName": "ハルカ", "initial": "ハ", "avatarColor": "#e8724c",
+      "minutesAgo": 300, "goal": "英単語を毎日100語、平均LoC 70以上をキープ", "progress": 45
+    },
+    {
+      "id": "g03", "userId": "u03", "userName": "みなみ", "initial": "み", "avatarColor": "#27ae60",
+      "minutesAgo": 720, "goal": "化学重要問題集をA問題だけ完走", "progress": 88
+    }
+  ],
+
+  "myRecords": [
+    { "id": "r01", "daysAgo": 0, "materialId": "m01", "durationMin": 65, "avgLoc": 74, "memo": "場合の数", "locSeries": [60, 68, 75, 80, 78, 72, 70, 76, 79, 74] },
+    { "id": "r02", "daysAgo": 0, "materialId": "m08", "durationMin": 30, "avgLoc": 58, "memo": "", "locSeries": [50, 55, 62, 60, 57, 54, 59, 63, 58, 56] },
+    { "id": "r03", "daysAgo": 1, "materialId": "m04", "durationMin": 90, "avgLoc": 81, "memo": "単振動", "locSeries": [70, 78, 84, 88, 86, 82, 79, 83, 85, 80] },
+    { "id": "r04", "daysAgo": 1, "materialId": "m06", "durationMin": 45, "avgLoc": 66, "memo": "", "locSeries": [58, 64, 70, 68, 65, 62, 67, 71, 66, 63] },
+    { "id": "r05", "daysAgo": 2, "materialId": "m02", "durationMin": 110, "avgLoc": 69, "memo": "1対1の演習", "locSeries": [72, 75, 70, 64, 60, 66, 71, 74, 68, 65] },
+    { "id": "r06", "daysAgo": 3, "materialId": "m09", "durationMin": 55, "avgLoc": 52, "memo": "眠かった", "locSeries": [60, 55, 48, 42, 45, 50, 54, 58, 52, 49] },
+    { "id": "r07", "daysAgo": 3, "materialId": "m01", "durationMin": 40, "avgLoc": 77, "memo": "", "locSeries": [70, 75, 80, 82, 78, 74, 76, 79, 77, 75] },
+    { "id": "r08", "daysAgo": 4, "materialId": "m05", "durationMin": 75, "avgLoc": 72, "memo": "力学の総復習", "locSeries": [65, 70, 75, 78, 74, 70, 72, 76, 73, 71] },
+    { "id": "r09", "daysAgo": 5, "materialId": "m11", "durationMin": 50, "avgLoc": 61, "memo": "", "locSeries": [55, 60, 66, 64, 58, 57, 62, 65, 61, 59] },
+    { "id": "r10", "daysAgo": 5, "materialId": "m03", "durationMin": 80, "avgLoc": 85, "memo": "過去問1年分", "locSeries": [78, 84, 88, 90, 87, 83, 85, 88, 86, 84] },
+    { "id": "r11", "daysAgo": 6, "materialId": "m07", "durationMin": 35, "avgLoc": 48, "memo": "", "locSeries": [52, 48, 44, 40, 45, 49, 51, 47, 46, 44] },
+    { "id": "r12", "daysAgo": 6, "materialId": "m08", "durationMin": 25, "avgLoc": 63, "memo": "", "locSeries": [58, 62, 66, 68, 64, 60, 62, 65, 63, 61] },
+    { "id": "r13", "daysAgo": 9, "materialId": "m01", "durationMin": 120, "avgLoc": 70, "memo": "", "locSeries": [65, 72, 76, 74, 68, 66, 71, 73, 70, 69] },
+    { "id": "r14", "daysAgo": 14, "materialId": "m04", "durationMin": 95, "avgLoc": 76, "memo": "", "locSeries": [70, 74, 79, 81, 78, 75, 77, 80, 76, 74] },
+    { "id": "r15", "daysAgo": 20, "materialId": "m06", "durationMin": 60, "avgLoc": 68, "memo": "", "locSeries": [62, 66, 70, 72, 69, 66, 68, 71, 68, 67] }
+  ],
+
+  "articles": [
+    { "id": "a01", "tag": "勉強法",   "title": "集中が切れる前に休む ― LoC が教えてくれる最適な休憩タイミング", "source": "Onsta Journal", "daysAgo": 1 },
+    { "id": "a02", "tag": "受験",     "title": "共通テスト直前100日、何を捨てて何を残すか", "source": "Onsta Journal", "daysAgo": 3 },
+    { "id": "a03", "tag": "体験談",   "title": "平均LoCを50から75まで上げた高3生の1日のルーティン", "source": "Onsta Journal", "daysAgo": 5 },
+    { "id": "a04", "tag": "科学",     "title": "手の動きから集中度が読み取れるのはなぜか", "source": "Onsta Journal", "daysAgo": 8 },
+    { "id": "a05", "tag": "大学紹介", "title": "理工系学部の選び方 ― 学科名だけで決めないために", "source": "Onsta Journal", "daysAgo": 12 }
+  ],
+
+  "findTargets": [
+    { "id": "f01", "key": "user",   "label": "ユーザーをさがす",   "desc": "同じ志望校の仲間を見つける" },
+    { "id": "f02", "key": "book",   "label": "教材をさがす",       "desc": "みんなが使っている参考書" },
+    { "id": "f03", "key": "school", "label": "大学をさがす",       "desc": "志望校の情報をチェック" }
+  ],
+
+  "notifications": 3,
+  "messages": 1
+}
