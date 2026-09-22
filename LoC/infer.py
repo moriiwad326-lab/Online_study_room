@@ -51,6 +51,7 @@ class LoCPredictor:
         )
         checkpoint = torch.load(Path(checkpoint_path), map_location=self.device)
         self.seq_len = int(checkpoint.get("seq_len", 20))
+        self.progress = 0
 
         self.model = build_model(dropout=float(checkpoint.get("dropout", 0.2)))
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -105,6 +106,51 @@ def open_source(source: str) -> cv2.VideoCapture:
     return capture
 
 
+def iter_sampled_frames(capture: cv2.VideoCapture, interval: float, is_camera: bool):
+    """interval 秒ごとのフレームを1枚ずつ返す。
+
+    カメラは**実時間**、動画ファイルは**動画内時間**で間引く。学習データは
+    `convert_frame_from_video.py --rate` によって動画内の秒間隔で抜かれているので、
+    ファイル入力を実時間で間引くと、デコードが実時間より速い分だけ間隔が広がり、
+    手の速度特徴のスケールが学習時とずれる（長い動画ではウォームアップすら終わらない）。
+    """
+    if is_camera:
+        next_sample_at = 0.0
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                return
+            now = time.monotonic()
+            if now >= next_sample_at:
+                next_sample_at = now + interval
+                yield frame
+        return
+
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:  # コンテナによっては fps を取れないので既定値に落とす
+        fps = 30.0
+
+    # 学習データを作る convert_frame_from_video.py は CAP_PROP_POS_MSEC で秒シークして
+    # いるので、推論側も再生位置（動画内時間）で合わせる。iPhone の MOV のような可変
+    # フレームレートでは fps が平均値でしかなく、フレーム数換算だと間隔がずれる。
+    next_sample_at = 0.0
+    index = 0
+    while True:
+        # grab() はデコードしないので、サンプルしないフレームを安く読み飛ばせる
+        if not capture.grab():
+            return
+        index += 1
+        position = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if position <= 0.0:  # POS_MSEC を返さないコンテナ向けのフォールバック
+            position = index / fps
+        if position >= next_sample_at:
+            ok, frame = capture.retrieve()
+            if not ok:
+                return
+            next_sample_at = position + interval
+            yield frame
+
+
 def run(
     source: str = "0",
     checkpoint_path: str | Path = DEFAULT_CHECKPOINT,
@@ -113,26 +159,23 @@ def run(
     device: Optional[str] = None,
 ) -> None:
     capture = open_source(source)
+    is_camera = source.isdigit()
     try:
         with LoCPredictor(checkpoint_path, device=device) as predictor:
-            print(f"seq_len={predictor.seq_len}, interval={interval}s / 'q' or Esc で終了")
+            print(f"device={predictor.device}, seq_len={predictor.seq_len}, "
+                  f"interval={interval}s（{'実時間' if is_camera else '動画内時間'}）"
+                  f" / 'q' or Esc で終了", flush=True)
             latest_loc: Optional[float] = None
-            next_sample_at = 0.0
 
-            while True:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-
-                now = time.monotonic()
-                if now >= next_sample_at:
-                    next_sample_at = now + interval
-                    loc = predictor.push(frame)
-                    if loc is not None:
-                        latest_loc = loc
-                        print(f"LoC = {loc:.2f}")
-                    else:
-                        print(f"ウォームアップ中（あと {predictor.warmup_remaining} フレーム）")
+            for frame in iter_sampled_frames(capture, interval, is_camera):
+                loc = predictor.push(frame)
+                if loc is not None:
+                    latest_loc = loc
+                    predictor.progress += 1
+                    print(f"[{predictor.progress * interval + predictor.seq_len}s] LoC = {loc:.2f}", flush=True)
+                else:
+                    print(f"ウォームアップ中（あと {predictor.warmup_remaining} フレーム）",
+                          flush=True)
 
                 if display:
                     text = "LoC: --" if latest_loc is None else f"LoC: {latest_loc:.2f}"
@@ -141,6 +184,11 @@ def run(
                     cv2.imshow("LoC", frame)
                     if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                         break
+
+            if predictor.progress == 0:
+                print(f"LoC を1度も出力できませんでした: ウォームアップに必要な "
+                      f"{predictor.seq_len} サンプル（= {predictor.seq_len * interval:.0f} 秒ぶん）"
+                      f"より映像が短いか、--interval が大きすぎます")
     finally:
         capture.release()
         if display:
