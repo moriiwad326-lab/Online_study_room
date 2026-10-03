@@ -11,7 +11,8 @@ def test_build_pipeline_config(tmp_path):
         input_path=tmp_path / 'video.mp4',
         output_root=tmp_path / 'output',
         rate_seconds=5,
-        window=4,
+        stride=2,
+        samples=3,
         model='dummy-model',
         simulate=True,
     )
@@ -20,6 +21,8 @@ def test_build_pipeline_config(tmp_path):
     assert config['frame_output_dir'] == str(tmp_path / 'output' / 'video')
     assert config['labels_csv'] == str(tmp_path / 'output' / 'video' / 'labels.csv')
     assert config['rate_seconds'] == 5
-    assert config['window'] == 4
+    assert config['stride'] == 2
+    assert config['samples'] == 3
+    assert config['attributes_jsonl'] == str(tmp_path / 'output' / 'video' / 'attributes.jsonl')
     assert config['model'] == 'dummy-model'
     assert config['simulate'] is True
