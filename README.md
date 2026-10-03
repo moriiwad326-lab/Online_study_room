@@ -35,8 +35,9 @@ Online_Study_Room/
 ├── .gitignore
 └── LoC/                            # 集中度(LoC)推定モデルの開発一式
     ├── core.py                     # **LoCModel**（①〜⑧を結線したモデル本体）
-    ├── dataset.py                  # features.npz + labels.csv → 時系列窓データセット
-    ├── train.py                    # 学習スクリプト（Huber損失 / LoC=-1 のマスク）
+    ├── dataset.py                  # features.npz + labels.csv → 時系列窓データセット（分割方式・ラベル平滑化）
+    ├── train.py                    # 学習スクリプト（Huber損失 / LoC=-1 のマスク / 動画単位分割）
+    ├── evaluate.py                 # leave-one-video-out 交差検証で汎化性能を測る
     ├── infer.py                    # 学習済みモデルによるリアルタイム推論（Webカメラ/動画）
     ├── MediaPipe_Hands.sample.py   # MediaPipe Hands によるWebカメラ手検出デモ
     ├── README.md                   # (簡易版) フレーム抽出スクリプトの使い方メモ
@@ -191,27 +192,108 @@ class LoCModel(nn.Module):
 
 ### 将来の拡張候補
 
-現アーキテクチャには**顔・視線・頭部姿勢の明示的な特徴がありません**。集中度の推定では、手の動きよりも「画面や教材を見ているか / よそ見しているか / 突っ伏しているか」の方が支配的な手がかりになります。現設計はこれをConvNeXtが暗黙に拾うことを期待していますが、データ量が限られる状況では明示特徴の方が有利です。MediaPipe Hands の特徴を作り込むより、**MediaPipe Face Mesh / Pose の追加**の方が投資対効果が高いと見込まれます（同一フレームワークのため実装コストも低い）。
+現アーキテクチャには顔・視線・頭部姿勢の明示的な特徴がありません。一般論としては「画面や教材を見ているか / よそ見しているか / 突っ伏しているか」の方が手の動きより支配的な手がかりで、MediaPipe Face Mesh / Pose の追加が有力な選択肢になります。
+
+**ただし現在の学習データではこれが使えません。** 収集済みの動画はすべて**机の真上から手元を写した画角**で、顔・上半身・視線はフレームに入っていません。写っているのは手・ペン・ノート・教材・机上の物体だけです。Face Mesh / Pose を足しても検出対象が存在しないため、この路線を採るなら**先にカメラの画角を変える（または顔用のカメラを足す）**必要があります。
+
+この画角の制約は、ラベリング側にも影響します。現在のプロンプト（`tools/qwen3_5.py`）は「机に突っ伏している」「頬杖など姿勢が崩壊」「視線が対象から外れる」を判定基準に含めていますが、いずれも**写っていないものを判定させている**ため、ラベルノイズの一因になっていると考えられます。
 
 ## データ作成パイプライン
 
 上記モデルを学習するための教師データを作るパイプラインが `LoC/tools/` にあります。人手でのラベリングの代わりに、ローカルで動くVLM（Ollama経由のqwen3.5）に判定させる方式です。
 
+### 集中度を直接聞かず、観測可能な属性を経由する
+
+初期版は「集中度を1〜5で答えて」とVLMに総合判断を丸投げしていました。これは次の理由で失敗していました。
+
+- ラベルの76%が3と4に集中し、3/4/5の区別が機能していなかった
+- 隣接フレーム（入力の95%が共通）で45%もラベルが変わり、**分散の約6割が独立ノイズ**だった（`lag-1` 自己相関 0.37）
+- 判定基準の多く（突っ伏し・頬杖・視線）が、**そもそも画角に写っていない**ものだった
+
+学習動画はすべて机の真上〜斜め上から撮った手元ショットで、顔は入っても部分的、視線は判定できません。写っていないものを判定させれば幻覚が返るだけです。
+
+そこで、質問を「観測可能な事実」に分解し、集中度はその事実から**決定論的な式**で合成する方式に変えました。
+
+```
+フレーム --qwen(2コール)--> 属性10項目 --compose_loc()--> LoC (1.0〜5.0)
+                              ↓
+                    attributes.jsonl（一次データ）
+                              ↓
+                    labels.csv（派生物。再生成できる）
+```
+
+この分解には3つの利点があります。
+
+1. **合成ルールを変えても再推論が要らない**。`--recompose` で `attributes.jsonl` から `labels.csv` を作り直せます。LoCは派生値にすぎません。
+2. **属性ごとに検証できる**。人手のゴールド集合と突き合わせれば、どの判定が壊れているか特定できます。総合値1〜5では原因を切り分けられません。
+3. **モデルの補助タスクに使える**。属性を同時に予測させると、少データでの正則化として効きます。
+
 ```mermaid
 flowchart LR
     V["学習動画\n(LoC/tools/input/*.mp4, *.mov)"] -->|"convert_frame_from_video.py\n--rate 秒間隔でフレーム抽出"| F["フレーム画像群\noutput/<動画名>/<秒>.jpg"]
-    F -->|"convert_LoC_from_frame.py\n直近--window枚を文脈としてqwen3_5.evaluate_locへ渡す"| L["labels.csv\n(frame, LoC[1-5 or -1])"]
-    L -->|"build_features.py
-ConvNeXt(768) + Hands(162) を事前計算"| N["features.npz
-(frames, image, hand)"]
-    V -.->|"dataset_creation.py が上記2ステップを一括実行"| L
+    F -->|"convert_LoC_from_frame.py\nqwen3.5 へ2コール"| A["attributes.jsonl\n(属性10項目の生データ)"]
+    A -->|"loc_rubric.compose_loc()\n決定論的な合成"| L["labels.csv\n(frame, LoC[1.0-5.0])"]
+    L -->|"build_features.py\nConvNeXt(768) + Hands(162) を事前計算"| N["features.npz\n(frames, image, hand)"]
+    V -.->|"dataset_creation.py が上記を一括実行"| L
     N -.->|"dataset.py / train.py"| M["LoCModel の学習"]
 ```
 
+### 属性スキーマ
+
+すべての属性は **`not_visible`** を取れます。画角によって写らないものがあるためで、合成式は観測できた証拠だけで正規化するので、画角が違ってもLoCのスケールが揃います。
+
+| 属性 | 値 | 役割 |
+|---|---|---|
+| `hands_in_frame` | 0 / 1 / 2 | 離席の検出 |
+| `phone` | absent / on_desk / in_hand | 最も強い非学習シグナル |
+| `pen_held` | true / false | 筆記の準備状態 |
+| `pen_tip_on_paper` | true / false | 筆記そのもの |
+| `hand_on_material` | true / false | 読書・思考中の関与 |
+| `writing_increased` | true / false | **学習が進んだ唯一の直接証拠**（60秒前との比較） |
+| `page_turned` | true / false | 学習の進行 |
+| `material_open` | true / false | 学習セッションの成立 |
+| `device_in_use` | none / pc / tablet | 筆記以外の学習形態の救済 |
+| `head_posture` | upright / propped / down | 上半身が写るときのみ |
+
+視線（`gaze`）は入れていません。現在の画角では判定できないためで、正面画角のデータが入った段階で追加します。
+
+### LoCの合成ルール（`loc_rubric.py`）
+
+まず**ゲート**（非学習が確定する条件）を見て、当たればそこで値を決め打ちます。
+
+| 条件 | LoC |
+|---|---|
+| スマホを手に持っている | 1.0 |
+| 机に突っ伏している | 1.0 |
+| 手が写らず、ペンも教材にも触れていない（離席） | 1.5 |
+| 教材が開いておらず、デバイスも使っていない | 2.0 |
+
+ゲートに当たらなければ、3.0 を基準に証拠で加減点します。項目は3種類に分かれます。
+
+- **CORE**（不在が意味を持つ。正規化の分母に入る）: `writing_increased` +0.8 / `pen_tip_on_paper` +0.5 / `pen_held` +0.2 / `hand_on_material` +0.2 / `head_posture=upright` +0.3
+- **BONUS**（在れば加点、無くても減点にならない）: `device_in_use` +0.4 / `page_turned` +0.2 / 両手 +0.1
+- **NEGATIVE**: 止まっている −0.6 / `phone=on_desk` −0.5 / `head_posture=propped` −0.4
+
+PC・タブレットで学習しているときは紙のCOREを分母から外します。外さないと「PCだからペンを持っていない」が減点として働いてしまうためです。BONUSを分母に入れないのは、「ページをめくっていない」が非集中の証拠ではないからです。
+
+### なぜqwenに2回聞くのか
+
+属性10項目を1回のプロンプトでまとめて聞くと、**`writing_increased` が8フレーム中8回ともfalse**になりました（目視では明らかに書き込みが増えている）。一方、2枚の画像だけを見せて「書き込みは増えたか」だけを聞くと正しくtrueを返し、根拠も具体的に述べます。能力の問題ではなく、他の9項目に埋もれていたということです。
+
+そこで質問を性質ごとに分けています。
+
+1. **進捗コール**: 60秒前と現在の2枚を見せ、時間方向の変化だけを聞く（`writing_increased` / `page_turned`）
+2. **状態コール**: 現在の1枚だけを見せ、その瞬間の静的な事実を聞く（残り8項目）
+
+さらに、進捗コールは「**既定は false。はっきり確認できる場合のみ true**」と明示しています。素直に聞くと96%がtrueになり、人が離席していて2枚が実質同一のフレームでもtrueを返すためです。聞き方を4通り比較した結果、この形が最も正確でした（正解の分かる6ペアで 5/6。素直に聞く形は 3/6）。VLMは「違いを探せ」と言われると違いを作ってしまうので、判断を保留したときに倒れる先をfalse側に固定しておく必要があります。
+
+### 各スクリプト
+
 - **`convert_frame_from_video.py`**: 動画（または動画の入ったディレクトリ）を受け取り、`--rate` 秒ごとに1フレームを `output/<動画ファイル名>/<秒数>.jpg` として書き出します（OpenCV使用）。
-- **`qwen3_5.py`**: Ollama の `qwen3.5:9b`（既定）にシステムプロンプト＋複数枚の連続画像を渡し、判定ステップ（完全な集中切れ→学習外行動→学習中のレベル分け、の3段階ルール）に従って `{"reason": ..., "level": 1-5}` のJSONを返させます。出力からlevelを頑健にパースする `evaluate_loc()` を提供します。
-- **`convert_LoC_from_frame.py`**: フレームディレクトリ内の画像をソートし、各フレームについて直近 `--window`（既定20、内部上限もDEFAULT_WINDOW=20）枚を文脈としてqwen3.5に渡し、`labels.csv`（`frame`, `LoC`）を出力します。`--simulate` で実際のOllama呼び出しなしに固定値（LoC=3）を書き出すテストモードもあります。
-- **`dataset_creation.py`**: 上記2つを1コマンドに統合したパイプライン。動画（複数可）ごとに「フレーム抽出 → LoCラベリング」を実行し、`output/<動画名>/` 以下にフレーム画像と `labels.csv` を生成します。
+- **`loc_rubric.py`**: 属性スキーマ（`ATTRIBUTE_SPEC`）、モデル出力の正規化（`normalize_attributes`）、LoCの合成（`compose_loc`）。Ollamaに依存しないので単体でテストできます。`SCHEMA_VERSION` を `attributes.jsonl` に記録しており、属性を足し引きしたらこれを上げます。
+- **`qwen3_5.py`**: Ollama の `qwen3.5:9b`（既定）へ進捗コールと状態コールを投げ、属性の辞書を返す `evaluate_attributes()` を提供します。`samples > 1` で同じ入力を複数回サンプリングし、**属性ごとに多数決**を取ります（割れた属性は `not_visible` になるので、自信のない判定が教師に混ざりません）。
+- **`convert_LoC_from_frame.py`**: フレームディレクトリを走査して属性を判定し、`attributes.jsonl` と `labels.csv` を書き出します。`--stride N` でNフレームおきに評価して間を線形補間（コストが 1/N になります）、`--recompose` で再推論なしに `labels.csv` だけ作り直し、`--simulate` でOllamaなしの動作確認ができます。1件ごとに追記するので、中断しても同じコマンドで再開できます。
+- **`dataset_creation.py`**: 上記を1コマンドに統合したパイプライン。`--reuse-frames` を付けると抽出済みフレームを再利用するので、ラベルだけ付け直したいときに数時間かかる再抽出を避けられます。
 - **`build_features.py`**: 抽出済みフレームを ConvNeXt-Tiny（768次元）と MediaPipe Hands（162次元）に通し、`output/<動画名>/features.npz` として保存します。ConvNeXtをfreezeして使うため、学習前に1度だけ通せば足ります。`dataset.py` はこの `features.npz` と `labels.csv` を突き合わせて時系列窓を作ります。
 
 ## セットアップ
@@ -249,17 +331,27 @@ python LoC/tools/convert_frame_from_video.py <動画ファイル or ディレク
 ### フレーム群から集中度ラベル(labels.csv)を生成する
 
 ```bash
-# Ollama + qwen3.5 が必要
-python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --window 20
+# Ollama + qwen3.5 が必要。10秒おきに評価し、間は線形補間する
+python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --stride 2
+
+# 合成ルールを変えたとき: 再推論せず attributes.jsonl から labels.csv を作り直す
+python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --recompose
 
 # Ollamaなしで動作確認だけしたい場合
 python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --simulate
 ```
 
+- `--stride N`: Nフレームおきに評価し、間を線形補間します。集中度は本来なめらかに変化するので、5秒刻みで全フレームを個別に判定するのは冗長です。推論コストが 1/N になります。
+- `--samples N`: 同じ入力をN回サンプリングして属性ごとに多数決を取ります。割れた属性は `not_visible` になります。コストはN倍です。
+- 1件ごとに `attributes.jsonl` へ追記するので、**中断しても同じコマンドで再開**できます。
+
 ### 動画 → フレーム抽出 → ラベリングを一括実行
 
 ```bash
-python LoC/tools/dataset_creation.py <動画ファイル or ディレクトリ> --output output --rate 5 --window 20
+python LoC/tools/dataset_creation.py <動画ファイル or ディレクトリ> --output output --rate 5 --stride 2
+
+# 抽出済みフレームを再利用して、ラベルだけ付け直す
+python LoC/tools/dataset_creation.py tools/input --output tools/output --rate 5 --stride 2 --reuse-frames
 ```
 
 ### フレーム群から学習用の特徴量をキャッシュする
@@ -275,13 +367,29 @@ ConvNeXtはfreezeして使うため、ここで1度通しておけば学習中�
 ### 集中度回帰モデルを学習する
 
 ```bash
-python LoC/train.py output --seq-len 20 --epochs 50 --batch-size 32
+python LoC/train.py output --split video --label-smooth 5 --seq-len 20 --epochs 50
 ```
 
 - `--seq-len`: LSTMに入れる時系列長（直近何フレームを見るか）。
-- `--val-ratio`: 各動画の**末尾**から検証に回す割合（既定0.2）。連続フレームはほぼ同一内容のため、ランダム分割ではなく時系列順に分割してリークを防いでいます。
+- `--split`: 学習/検証の分け方。
+  - `video`（既定）: **動画単位**で振り分ける。同一動画は片側にしか入らないので、人物・部屋・服装・カメラ位置が train と val で共有されない。ConvNeXtの768次元はImageNet特徴で背景や人物を強くエンコードしているため、同一動画が両側に入ると「誰のどの部屋か」を手がかりに当てられてしまう。**汎化性能を測るならこちら**。
+  - `tail`: 動画ごとに時系列順で末尾 `--val-ratio` を検証に回す（旧挙動）。同一動画が両側に入るためリークがあり、数字は楽観的に出る。学習が回っているかの確認用。
+- `--val-videos`: 検証に回す動画ディレクトリ名をカンマ区切りで明示する（`--split video` のとき）。
+- `--label-smooth`: ラベル系列にかける中央値フィルタの幅（奇数。1で無効、**推奨5**）。qwenのラベルは窓を1フレームずつずらして独立に生成されるため、隣接フレームが入力の95%を共有しているのに45%のフレームでラベルが変わり、分散の約6割が独立ノイズになっています。中央値フィルタは「実際に集中が切れた瞬間」のステップを保ったままスパイクだけを削ります。平滑化後のラベルは整数でなくなりますが、回帰タスクなのでそのまま教師に使えます。
+- `--val-ratio`: 検証に回す割合（既定0.2）。`--split video` では動画単位で切るため目標値として扱われます。どちらの分割でもランダムシャッフルはしません（連続フレームはほぼ同一内容なので、シャッフルするとリークが最大化されます）。
 - 損失は `SmoothL1Loss`（Huber）。`labels.csv` の `LoC = -1`（qwen3.5が判定不能）の行は教師から除外されます。
+- 毎エポック、**「常に学習データのラベル平均を出力するだけ」の予測器のMAE**（`baseline_MAE`）を併記します。`val_MAE` がこれを下回っていなければ、モデルは入力を使えていないのと同じです。
 - ベストスコアのチェックポイントを `LoC/checkpoints/loc_model.pt` に保存します。
+
+### 汎化性能を交差検証で測る
+
+```bash
+python LoC/evaluate.py output --label-smooth 5 --epochs 20
+```
+
+全動画を1本ずつ検証側へ回して学習し（leave-one-video-out）、`val_MAE` の加重平均を出します。検証に回す動画を1組に固定すると、どの動画が当たったかで数字が大きく動く（1本あたり39〜788サンプルとばらついている）ため、当たり外れを均すために使います。動画14本・20エポックでCPUでも約4分です。
+
+ラベルの品質はモデルより先に効きます。現状のラベルは分散の約6割が独立ノイズで、`lag-1` 自己相関は0.37しかありません。この水準では、完璧なモデルでも MAE 0.52 程度が下限になります。ラベリング方式を変える際は、人手で付けたゴールド集合（数百フレーム）との一致を基準に比較してください。
 
 ### 学習済みモデルで集中度を推定する
 
@@ -339,26 +447,41 @@ cd LoC
 pytest
 ```
 
-現状のテストは以下の4ファイル・計24件です（`torch` が無い環境では `test_core_model.py` / `test_loc_dataset.py` はスキップされます）。
+現状のテストは以下の5ファイル・計53件です（`torch` が無い環境では `test_core_model.py` / `test_loc_dataset.py` はスキップされます）。
 
 - `tests/test_dataset_creation.py` — `dataset_creation.build_pipeline_config` の設定値組み立てを検証。
 - `tests/test_core_model.py` — `LoCModel` の出力形状、値域が必ず1〜5に収まること、③〜⑦の次元がアーキテクチャ表と一致すること、単方向であること、最終タイムステップのみを使うこと、両ブランチに勾配が流れることを検証。
-- `tests/test_loc_dataset.py` — 時系列窓の切り出し（過去側に取る／動画をまたがない／先頭のウォームアップを捨てる）、`LoC = -1` と未ラベル行の除外、学習・検証分割が時系列順であることを検証。
+- `tests/test_loc_dataset.py` — 時系列窓の切り出し（過去側に取る／動画をまたがない／先頭のウォームアップを捨てる）、`LoC = -1` と未ラベル行の除外、`tail` 分割が時系列順であること、`video` 分割で同一動画がtrain/valの両側に入らないこと、中央値フィルタがスパイクを消しステップと端点を保つこと（`-1` を平滑化に巻き込まないこと）を検証。
+- `tests/test_loc_rubric.py` — 属性の正規化（欠損・文字列bool・スキーマ外の値を捏造しないこと）、非学習が確定するゲート条件が加点で打ち消されないこと、`not_visible` が多くても値域が [1, 5] に収まり画角の違う動画で同じ学習状態なら同じ評価になること、何も観測できないときにラベルを作らないことを検証。
 - `tests/test_hand_feature_extractor.py` — 特徴レイアウトの整合性、未検出時の0埋めと検出フラグ、相対座標の平行移動不変性・スケール不変性、速度特徴（手全体の移動と指の動きの分離、未検出フレームとの差分を取らないこと）を検証。実際の手の画像を用意しなくてよいよう、`encode_hand_block` / `compute_velocity` を合成ランドマークで直接テストしています。
 
 ## 現在の実装状況と既知のギャップ
 
 READMEの精度維持のため、調査時点（2026-08-26）で確認できた実装状況・未実装点を明記します。
 
-- **モデルパイプライン**: `LoC/core.py` の `LoCModel` として①〜⑧を結線済み。`tools/build_features.py`（特徴キャッシュ）→ `dataset.py`（時系列窓）→ `train.py`（Huber回帰）→ `infer.py`（リアルタイム推論）まで通る。**ただし実データでの学習・精度評価はまだ行っていない**（合成データでの疎通確認のみ）。
+- **モデルパイプライン**: `LoC/core.py` の `LoCModel` として①〜⑧を結線済み。`tools/build_features.py`（特徴キャッシュ）→ `dataset.py`（時系列窓）→ `train.py`（Huber回帰）→ `infer.py`（リアルタイム推論）まで通る。実データ（動画24本・11,667フレーム）での学習と leave-one-video-out 評価まで実施済み。
+- **現時点の精度**: leave-one-video-out（動画24本・`--label-smooth 5`・20エポック）で `val_MAE = 0.740`、同条件の「平均を出すだけ」のベースラインが `1.025`（**−27.8%**）。24本中22本でベースラインを上回る。`train_MAE = 0.388` との開きが大きく、**過学習が現在の主なボトルネック**（best epoch が 1〜5 で到来する）。
+- **ラベリング方式**: 属性ベース（`tools/loc_rubric.py`）。観測可能な属性10項目をqwenに報告させ、決定論的な式でLoCを合成する。旧方式（1〜5の総合値を直接出させる）との比較は下表。
+
+  | 指標（10秒間隔で比較） | 旧: 総合値を直接 | 新: 属性ベース |
+  |---|---|---|
+  | `lag-1` 自己相関 | 0.390 | **0.538** |
+  | ノイズが占める分散の割合 | 61% | **46%** |
+  | ラベルの標準偏差 | 0.82 | **1.27** |
+  | val_MAE / baseline_MAE | 0.881 | **0.722** |
+
+  旧ラベルは `labels_v0.csv` として各ディレクトリに残してある。
+- **人手のゴールド集合**: 未作成。属性ごとの一致率を測る基準がないため、プロンプト変更の効果を厳密には評価できない（現状はこちらで正解を確認した数ペアでの比較に留まる）。
+- **ラベリングのサンプリング**: `--stride 2`（10秒おきに評価して線形補間）・`--samples 1` で生成済み。`--samples 3`（属性ごとの多数決）は未適用で、残っているノイズの主因である `writing_increased` の判定揺れに効くと見込まれる。
 - **`main.py` / `System/`**: 空。自習室サービス本体は未着手。LoC推論の呼び出し口としては `infer.py` の `LoCPredictor` を使う想定。
 - **ConvNeXt側**: `ConvNeXT/image_feature_extractor.py` でヘッドレス化（768次元）と特徴キャッシュを実装済み。`tiny_model.py`（1000クラスのロジット取得デモ）と `finetune.py`（LoCとは別の料理画像256クラス分類の雛形）は、参考用の旧PoCとしてそのまま残っている。
 - **MediaPipe Hands側**: `MediaPipe_Hands/hand_feature_extractor.py` に片手81次元×両手＝162次元の特徴ベクトルを返す `HandFeatureExtractor` / `extract_hand_features` を実装済み。相対座標化・検出フラグ・z座標・フレーム間差分・アスペクト比補正を含み、アーキテクチャ②の要件を満たしている（`MediaPipe_Hands.sample.py` は引き続きOpenCVウィンドウでの可視化デモとして独立に存在）。**残課題**はフレーム間隔への依存（下記の項目を参照）。
 - **射影MLP（③④）・出力レンジ制約（⑧）**: `MLP/projection.py` の `ProjectionMLP` と `core.py` で実装済み。`MLP/MLP_classifier.py` は分類用PoCとして別に残しており、LoCモデルからは使っていない。
 - **LSTM / MLP のPoC**: `LSTM_train.py` / `MLP_classifier_train.py` は引き続きダミーデータの単体PoC。`LSTM.py` はサイン波データ生成を `make_sine_dataset()` に閉じ込め、`core.py` から `SimpleLSTM` を import しても乱数シードの固定やダミーデータ生成が副作用として走らないようにしてある（併せて `LSTM_train.py` の `X` / `Y` 未定義エラーも解消）。
-- **学習ループ**: `train.py` に実装済み（`SmoothL1Loss`、`LoC=-1` の除外、時系列順の train/val 分割、ベストスコアのチェックポイント保存）。**未実装**: 学習率スケジューラ、早期終了、ConvNeXt最終ステージの段階的解凍。
+- **学習ループ**: `train.py` に実装済み（`SmoothL1Loss`、`LoC=-1` の除外、動画単位／時系列順の train/val 分割、ラベルの中央値フィルタ、ベースラインMAEの併記、ベストスコアのチェックポイント保存）。交差検証は `evaluate.py`。**未実装**: 学習率スケジューラ、早期終了、ConvNeXt最終ステージの段階的解凍、特徴レベルのデータ拡張、属性を補助タスクとするマルチタスク学習。ラベルの質が改善した結果、次に効くのはこの正則化まわりになった。
 - **フレーム間隔への依存**: 手の速度特徴が「1フレーム前との差分」であるため、`--rate`（学習時）と `--interval`（推論時）を揃える必要がある。現状は利用者が揃える運用で、間隔で除して正規化する処理は未実装。`features.npz` にも間隔のメタデータは持たせていない。
 - **`requirements.txt`**: `torch` / `transformers` / `ollama` / `pytest` を追記済み。ただし `mediapipe` は Python 3.13以降の配布が無いため、`torch` と同居させるには 3.11 系の仮想環境が必要。
+- **カメラの画角**: 収集済みの動画24本はすべて机の真上〜斜め上から手元を写したもの。顔は入っても部分的で、視線は判定できない。一方 `static/js/pages/record.js` の `getUserMedia` は `facingMode` を指定しておらず、PCの内蔵カメラ＝正面から顔と上半身を写す画角になる。**学習データとアプリで画角が逆向き**なので、現モデルをそのままアプリに繋いでも妥当な値は出ない。画角を揃えるか、両画角を扱えるようモデルを拡張するかの判断が必要。
 - **学習用動画・生成物**: `LoC/tools/input/`, `LoC/tools/output/`, `LoC/.venv/`, `LoC/tools/venv/` は `.gitignore` により追跡対象外（大容量の動画・大量のフレーム画像・仮想環境のため）。
 
 ## 技術選定メモ
