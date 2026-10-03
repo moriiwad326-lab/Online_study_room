@@ -136,7 +136,8 @@ def run(
 
     written: List[Path] = []
     # MediaPipe Hands は CPU 実行のみなので device を渡すのは ConvNeXt 側だけ
-    with ImageFeatureExtractor(device=device) as image_extractor, \n            HandFeatureExtractor() as hand_extractor:
+    with ImageFeatureExtractor(device=device) as image_extractor, \
+            HandFeatureExtractor() as hand_extractor:
         print(f"ConvNeXt device: {image_extractor.device}")
         for frame_dir in frame_dirs:
             output_path = frame_dir / FEATURES_FILENAME
