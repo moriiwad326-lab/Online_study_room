@@ -119,7 +119,7 @@ class LoCSequenceDataset(Dataset):
     def __init__(
         self,
         roots: Sequence[str | Path] | str | Path,
-        seq_len: int = 20,
+        seq_len: int = 12,
         subset: str = "all",
         val_ratio: float = 0.2,
         split: str = "video",
@@ -279,7 +279,7 @@ class LoCSequenceDataset(Dataset):
 
 def build_datasets(
     roots: Sequence[str | Path] | str | Path,
-    seq_len: int = 20,
+    seq_len: int = 12,
     val_ratio: float = 0.2,
     split: str = "video",
     val_videos: Optional[Sequence[str]] = None,

@@ -8,6 +8,8 @@
  *   接続先 : ws://localhost:8765/loc
  *   送信   : { "type": "frame", "timestamp": <ms>, "image": "<JPEGのBase64>" }   約5fps
  *   受信   : { "type": "loc",   "timestamp": <ms>, "loc": 0〜100 }
+ *            { "type": "warmup", "timestamp": <ms>, "remaining": <残り枚数>, "total": <窓の長さ>, "seconds": <残り秒> }
+ *            （モデルは直近12サンプル＝約60秒ぶんの映像がたまるまで LoC を出せない）
  * ──────────────────────────────────────────────────────────────
  */
 
@@ -19,13 +21,13 @@ import { clampLoc } from "./utils.js";
  *   "live" … WebSocket で推論サーバーに接続し、カメラフレームを送る
  */
 export const LOC_CONFIG = {
-  mode: "mock",
+  mode: "live",
 
   // --- 本番モードの設定 ---
   url: "ws://localhost:8765/loc",
   fps: 5,                 // 1秒あたり何枚フレームを送るか
-  frameWidth: 320,        // 送信するJPEGの横幅（縦は映像の比率に合わせる）
-  jpegQuality: 0.6,       // JPEG の品質（0〜1）。上げると精度は上がるが通信量も増える
+  frameWidth: 640,        // 送信するJPEGの横幅（縦は映像の比率に合わせる）。小さいと手の検出が落ちる
+  jpegQuality: 0.8,       // JPEG の品質（0〜1）。上げると精度は上がるが通信量も増える
   connectTimeoutMs: 4000, // これだけ待って繋がらなければ失敗とみなす
 
   // --- モックモードの設定 ---
@@ -59,10 +61,13 @@ export class LocClient {
    * @param {object} handlers
    * @param {(payload:{loc:number, timestamp:number})=>void} handlers.onLoc    LoC を受け取るたびに呼ばれる
    * @param {(status:string, detail?:string)=>void}          handlers.onStatus 接続状態が変わったときに呼ばれる
+   * @param {(payload:{remaining:number, total:number, seconds:number})=>void} handlers.onWarmup
+   *        推論サーバーが最初の LoC を出せるようになるまでの進み具合（本番モードのみ）
    */
-  constructor({ onLoc, onStatus } = {}) {
+  constructor({ onLoc, onStatus, onWarmup } = {}) {
     this.onLoc = onLoc || (() => {});
     this.onStatus = onStatus || (() => {});
+    this.onWarmup = onWarmup || (() => {});
 
     this.mode = LOC_CONFIG.mode;
     this.status = LOC_STATUS.IDLE;
@@ -201,6 +206,12 @@ export class LocClient {
         this.onLoc({
           loc: clampLoc(data.loc),
           timestamp: data.timestamp || Date.now(),
+        });
+      } else if (data.type === "warmup") {
+        this.onWarmup({
+          remaining: Number(data.remaining) || 0,
+          total: Number(data.total) || 0,
+          seconds: Number(data.seconds) || 0,
         });
       }
     };

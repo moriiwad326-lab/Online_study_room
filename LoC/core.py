@@ -8,7 +8,7 @@
     画像 --② MediaPipe Hands--------> 162 --④ 射影MLP--> 64  --+
                                                                |
                     --⑥ LSTM(192->256, 単方向, 最終ステップ)-->
-                    --⑦ MLPヘッド(256->64->1)--> ⑧ sigmoid*4+1 --> LoC [1,5]
+                    --⑦ MLPヘッド(256->64->1)--> ⑧ sigmoid*100 --> LoC [0,100]
 
 ①②（特徴抽出）は学習前に `tools/build_features.py` で `.npy` へキャッシュする前提
 なので、`LoCModel` が受け取るのは画像/手の**特徴ベクトル列**であって生画像ではない。
@@ -36,13 +36,14 @@ try:
 except ImportError:  # mediapipe 未インストールの学習環境でもモデル定義は使えるようにする
     HAND_FEATURE_DIM = 162  # MediaPipe_Hands.hand_feature_extractor.FEATURE_DIM と一致させること
 
-# 集中度の物理的な値域（⑧ の出力レンジ制約）
-LOC_MIN = 1.0
-LOC_MAX = 5.0
+# 集中度の物理的な値域（⑧ の出力レンジ制約）。ラベル（tools/loc_rubric.py）と同じ 0〜100。
+# ラベルは「普通」= 40 を軸にした段階に加減点して作るので、分布も 40 付近が中心になる
+LOC_MIN = 0.0
+LOC_MAX = 100.0
 
 
 class LoCModel(nn.Module):
-    """画像特徴列と手指特徴列から集中度（1〜5）を回帰するモデル。
+    """画像特徴列と手指特徴列から集中度（0〜100）を回帰するモデル。
 
     img_dim / hand_dim: 入力特徴の次元（既定は ConvNeXt 768 / Hands 162）
     d_img / d_hand:     射影後の次元（③④）。128 : 64 とし、素の 768 : 162 ≒ 5 : 1 という
@@ -86,7 +87,7 @@ class LoCModel(nn.Module):
         z = torch.cat([self.img_proj(img_feat), self.hand_proj(hand_feat)], dim=-1)
         last = self.lstm(z)  # (B, head_hidden) 最終タイムステップのみ
         raw = self.head(last)  # (B, 1)
-        # ⑧ sigmoid で [0,1] に潰してから [1,5] へ写す
+        # ⑧ sigmoid で [0,1] に潰してから [0,100] へ写す
         return torch.sigmoid(raw) * (LOC_MAX - LOC_MIN) + LOC_MIN
 
 

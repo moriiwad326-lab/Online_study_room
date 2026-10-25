@@ -125,6 +125,7 @@ def run_pipeline(
         compute_attributes_for_images(
             str(frame_output_dir), image_files, stride=stride, samples=samples,
             model=model, simulate=simulate, skip_warmup=skip_warmup,
+            interval=rate_seconds,
         )
         points = compose_labels_from_attributes(str(frame_output_dir), image_files)
         if not points:

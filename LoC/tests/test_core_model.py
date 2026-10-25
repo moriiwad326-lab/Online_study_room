@@ -34,7 +34,7 @@ def test_forward_shape(model):
 
 
 def test_output_is_bounded_to_loc_range(model):
-    # ⑧ sigmoid*4+1 により、どんな入力でも物理的に 1〜5 に収まる
+    # ⑧ sigmoid*100 により、どんな入力でも物理的に 0〜100 に収まる
     img = torch.randn(8, 5, IMAGE_FEATURE_DIM) * 1e3
     hand = torch.randn(8, 5, HAND_FEATURE_DIM) * 1e3
 

@@ -32,7 +32,7 @@ import torch
 
 from core import HAND_FEATURE_DIM, IMAGE_FEATURE_DIM, LOC_MAX, LOC_MIN, build_model
 
-DEFAULT_SEQ_LEN = 20
+DEFAULT_SEQ_LEN = 12
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
 
 

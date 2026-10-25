@@ -43,6 +43,11 @@ from dataset import build_datasets
 
 DEFAULT_CHECKPOINT = PACKAGE_ROOT / "checkpoints" / "loc_model.pt"
 
+# Huber損失で二乗→線形に切り替わる誤差（LoC の点数単位、0〜100）。既定の 1.0 のままだと
+# 0〜100 のスケールではほぼ L1 になる。qwen の段階の取り違え（25点以上の跳び）は外れ値として
+# 線形に、属性による加減点の範囲（10点程度）の誤差は二乗で詰める
+HUBER_BETA = 10.0
+
 
 def run_epoch(
     model: nn.Module,
@@ -85,7 +90,7 @@ def run_epoch(
 
 def train(
     data_root: str | Path,
-    seq_len: int = 20,
+    seq_len: int = 12,
     epochs: int = 50,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
@@ -136,7 +141,7 @@ def train(
 
     model = build_model(dropout=dropout).to(torch_device)
     # Huber損失: 自動ラベルのノイズ（外れ値）に引っ張られにくくする
-    criterion = nn.SmoothL1Loss()
+    criterion = nn.SmoothL1Loss(beta=HUBER_BETA)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     if checkpoint_path is not None:
@@ -198,7 +203,7 @@ def train(
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="LoCModel（集中度回帰）を学習する")
     parser.add_argument("data", help="features.npz と labels.csv を含むディレクトリ（またはその親）")
-    parser.add_argument("--seq-len", type=int, default=20, help="LSTM に入れる時系列長")
+    parser.add_argument("--seq-len", type=int, default=12, help="LSTM に入れる時系列長")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)

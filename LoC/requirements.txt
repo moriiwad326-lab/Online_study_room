@@ -12,5 +12,8 @@ pillow
 # 集中度の自動ラベリング（tools/qwen3_5.py）。別途 Ollama 本体と qwen3.5 の pull が必要
 ollama>=0.3
 
+# フロント（../static）との接続（server.py）
+websockets>=13
+
 # テスト
 pytest

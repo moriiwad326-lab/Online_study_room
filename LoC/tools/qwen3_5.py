@@ -1,16 +1,19 @@
-"""Ollama 経由で qwen3.5 に学習フレームの**属性**を判定させる。
+"""Ollama 経由で qwen3.5 に学習フレームの**段階**と**属性**を判定させる。
 
-旧版はこのモジュールで「集中度を1〜5で答えて」と総合判断をさせていたが、
+LoC は次の2段で作る（合成は `loc_rubric.compose_loc`）。
 
-- 判定基準の多く（突っ伏し・頬杖・視線）が画角に写っておらず、幻覚を生んでいた
-- 5段階という抽象スケールへの総合判断はVLMの苦手分野で、ラベル分散の約6割がノイズだった
-- 「最初のフレームが非学習なら Level 2 で固定」というルールが、窓の先頭1フレームへの
-  強い依存を生み、窓をずらすたびにラベルが階段状に跳んでいた
+1. **段階コール**: 60秒前〜現在の5枚（-60 / -30 / -10 / -5 / 0 秒）を見せ、画像だけから
+   0 / 25 / 40 / 75 / 100 の5段階で答えさせる。直前の様子ほど現在の集中を表すので、
+   フレームは直前に寄せて選ぶ。40（普通）が軸で、75 / 25 は中間として柔軟に選ばせる。
+2. **属性コール**: 観測可能な事実（ペン先が紙に触れているか等）を答えさせ、
+   段階の中での細かい位置を ±25 の加減点で決める。
 
-ので、**観測可能な属性だけを答えさせ、LoC は `loc_rubric.compose_loc` で決定論的に合成する**
-方式へ変更した。このモジュールが返すのは属性の辞書であって LoC ではない。
+旧々版は「集中度を1〜5で答えて」と総合判断だけをさせていたが、ラベルが3と4に固まり、
+「最初のフレームが非学習なら Level 2 で固定」のようなルールが窓の先頭1フレームへの強い
+依存を生んでいた。段階の判定は大づかみに留め（段階の定義に具体的な行動を書く）、細かい
+差は属性に任せる。
 
-## なぜ2回に分けて聞くのか
+## なぜ属性を2回に分けて聞くのか
 
 属性10個を1回のプロンプトでまとめて聞くと、**`writing_increased` が常に false になる**という
 失敗が実測で出た（8フレーム試して8回とも false。目視では明らかに書き込みが増えている）。
@@ -23,7 +26,8 @@
    （`writing_increased` / `page_turned`）
 2. **状態コール**: 現在の1枚だけを見せ、その瞬間の静的な事実を聞く（残り8項目）
 
-画像は合計3枚で済むので、10項目を5枚で聞いていた頃より速く、かつ正確になる。
+段階コールも属性とは別に聞く。点数を付けさせるプロンプトに属性の質問を混ぜると、
+属性が点数に引きずられる（「集中度の点数は付けないでください」と書いているのはそのため）。
 
 ## 進捗コールは「既定 false」で聞く
 
@@ -39,13 +43,14 @@ from __future__ import annotations
 import io
 import json
 import re
+import statistics
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ollama import chat
 from PIL import Image
 
-from loc_rubric import ATTRIBUTE_NAMES, NOT_VISIBLE, normalize_attributes
+from loc_rubric import ATTRIBUTE_NAMES, NOT_VISIBLE, normalize_attributes, normalize_level
 
 DEFAULT_MODEL = "qwen3.5:9b"
 
@@ -57,8 +62,46 @@ IMAGE_MAX_SIDE = 768
 IMAGE_JPEG_QUALITY = 85
 
 # 文脈フレームのオフセット（判定対象=0、負の値が過去）。フレーム間隔が5秒なら
-# -12 は 60秒前。進捗コールはこの2枚だけを使う。
-DEFAULT_CONTEXT_OFFSETS = (-12, 0)
+# -60 / -30 / -10 / -5 / 0 秒。60秒ぶん12フレームのうち、直前に寄せて5枚を使う。
+# 段階コールは5枚すべて、進捗コールは先頭（60秒前）と末尾（現在）の2枚だけを使う。
+DEFAULT_CONTEXT_OFFSETS = (-12, -6, -2, -1, 0)
+
+# フレームの切り出し間隔（秒）。dataset_creation の --rate の既定と同じ。
+# 段階プロンプトで「何秒前の画像か」を伝えるのに使う
+FRAME_INTERVAL_SECONDS = 5
+
+LEVEL_PROMPT = """学習中の机を同じ角度から撮影した{count}枚の画像です。左から順に{times}の様子で、最後の1枚が現在です。
+画像だけを見て、**現在**の学習者の集中の状態を次の5段階から1つ選んでください。
+直前（後ろの画像）の様子ほど重視してください。
+
+100: 極めて高い集中（フロー状態）
+     - ペン先の動きやタイピングなどの学習行動が、一定のペースで途切れなく続いている。
+     - 暗記や黙読などで手が止まっていても、手遊びなどの無駄な動きが一切ない。
+75:  高い集中
+     - 勉強以外のほかの作業をしていない。
+     - 学習行動が続いている。ペンが止まる時間があっても、資料を見ている・考えている様子で、手遊びはないか1回程度
+40:  普通
+     - ペン回し、髪や顔を触る、机を指で叩くなどの手遊び・無意識の動作が散見される。
+     - 作業ペースにムラがあり、ペンが止まっている時間と動いている時間が混在する。
+     - 時折、視線が学習対象から外れている（頭部が上を向くなど）。
+25:  学習対象から離れている時間が長い、学習に戻れていない。
+     - 勉強以外の作業や行動時間のほうが長く、学習行動がほとんど見られない。
+     - スマホを片手で触る、教材から顔・体が離れている、教材と関係ない物を触っている時間が、学習行動より長い（離席・居眠りまではいかない）
+0:   退出・居眠り
+     - スマートフォンを両手で操作している（ゲームやSNSなどの明らかな非学習行動）。
+     - 机に突っ伏している、または腕組みをして目を閉じている（居眠り）。
+     - 両手がフレームアウトしている（離席、または別の作業をしている）。
+
+どれかに迷ったら 40 を基準にして、はっきりした根拠があるときだけ上下に動かしてください。
+75 と 25 は、画像の様子に合わせて柔軟に使ってください。
+
+次のJSONだけを出力してください。
+
+{{
+  "level": 0 | 25 | 40 | 75 | 100,
+  "reason": "<判断の根拠を40文字以内>"
+}}
+"""
 
 PROGRESS_PROMPT = """2枚の画像は、同じ机を同じ角度から撮影したものです。1枚目が過去、2枚目が現在です。
 
@@ -184,24 +227,55 @@ def _vote(values: Sequence[Any]) -> Any:
     return next(value for value in values if repr(value) == top)
 
 
+def _describe_times(offsets: Optional[Sequence[int]], count: int, interval: float) -> str:
+    """段階プロンプトに入れる「各画像が何秒前か」の説明文。"""
+    if offsets is None or len(offsets) != count:
+        return "古い順"
+    labels = [
+        "現在" if offset == 0 else f"{-offset * interval:g}秒前"
+        for offset in sorted(offsets)
+    ]
+    return "・".join(labels)
+
+
+def evaluate_level(
+    image_paths: Sequence[str],
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.1,
+    offsets: Optional[Sequence[int]] = None,
+    interval: float = FRAME_INTERVAL_SECONDS,
+) -> Tuple[Optional[int], str]:
+    """5枚（時系列順、末尾が現在）から段階を1回判定する。読めなければ (None, 理由)。"""
+    prompt = LEVEL_PROMPT.format(
+        count=len(image_paths), times=_describe_times(offsets, len(image_paths), interval))
+    raw = _ask(prompt, image_paths, model, temperature)
+    reason = raw.get("reason")
+    return normalize_level(raw.get("level")), (reason[:60] if isinstance(reason, str) else "")
+
+
 def evaluate_attributes(
     image_paths: Sequence[str],
     model: str = DEFAULT_MODEL,
     samples: int = 1,
+    offsets: Optional[Sequence[int]] = None,
+    interval: float = FRAME_INTERVAL_SECONDS,
 ) -> Dict[str, Any]:
-    """最後の画像について属性を判定して返す。
+    """最後の画像について段階と属性を判定して返す。
 
-    image_paths の先頭を「過去の基準フレーム」、末尾を「判定対象の現在フレーム」として扱う。
-    進捗コール（2枚）と状態コール（1枚）を別々に投げ、結果を1つの辞書にまとめる。
+    image_paths は時系列順で、先頭を「過去の基準フレーム」、末尾を「判定対象の現在フレーム」
+    として扱う。段階コール（全枚）・進捗コール（先頭と末尾の2枚）・状態コール（末尾1枚）を
+    別々に投げ、結果を1つの辞書にまとめる。段階は "level"、その根拠は "level_reason" に入る。
 
-    samples > 1 なら各コールを複数回サンプリングし、**属性ごとに多数決**を取る。
-    割れた属性は not_visible になるので、自信の無い判定が教師に混ざらない。
+    samples > 1 なら各コールを複数回サンプリングし、属性は**属性ごとに多数決**、段階は
+    **中央値**を取る。割れた属性は not_visible になるので、自信の無い判定が教師に混ざらない。
     """
     if not image_paths:
         raise ValueError("image_paths が空です")
     current = image_paths[-1]
     past = image_paths[0]
 
+    levels: List[int] = []
+    level_reasons: List[str] = []
     progress_runs: List[Dict[str, Any]] = []
     state_runs: List[Dict[str, Any]] = []
     notes: List[str] = []
@@ -209,6 +283,12 @@ def evaluate_attributes(
     for index in range(max(1, samples)):
         # 1回目は決定的に、2回目以降は散らして多様性を出す（自己一貫性）
         temperature = 0.1 if index == 0 else 0.7
+
+        level, reason = evaluate_level(image_paths, model, temperature, offsets, interval)
+        if level is not None:
+            levels.append(level)
+            if reason:
+                level_reasons.append(reason)
 
         if past != current:
             raw = _ask(PROGRESS_PROMPT, [past, current], model, temperature)
@@ -234,6 +314,9 @@ def evaluate_attributes(
     for name in STATE_ATTRIBUTES:
         result[name] = _vote([run[name] for run in state_runs])
 
+    # 段階は順序のある値なので、多数決ではなく中央値を取る（割れても中間に落ち着く）
+    result["level"] = normalize_level(statistics.median(levels)) if levels else None
+    result["level_reason"] = level_reasons[0] if level_reasons else ""
     result["note"] = " / ".join(notes[:2])
     result["samples"] = len(state_runs)
     return result
@@ -257,8 +340,11 @@ def build_context_paths(
 __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_CONTEXT_OFFSETS",
+    "FRAME_INTERVAL_SECONDS",
+    "LEVEL_PROMPT",
     "PROGRESS_PROMPT",
     "STATE_PROMPT",
+    "evaluate_level",
     "evaluate_attributes",
     "build_context_paths",
 ]

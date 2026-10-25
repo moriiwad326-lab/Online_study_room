@@ -35,7 +35,7 @@ from train import train
 
 def cross_validate(
     data_root: str | Path,
-    seq_len: int = 20,
+    seq_len: int = 12,
     epochs: int = 30,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
@@ -109,7 +109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="動画単位の leave-one-video-out 交差検証で汎化性能を測る")
     parser.add_argument("data", help="features.npz と labels.csv を含むディレクトリ（またはその親）")
-    parser.add_argument("--seq-len", type=int, default=20)
+    parser.add_argument("--seq-len", type=int, default=12)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)

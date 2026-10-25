@@ -1,9 +1,13 @@
-"""フレーム群を qwen3.5 に通して**属性**を判定し、LoC ラベルを合成する。
+"""フレーム群を qwen3.5 に通して**段階と属性**を判定し、LoC ラベル（0〜100）を合成する。
 
 出力はディレクトリ内に2つ:
 
-- `attributes.jsonl` … qwen が返した属性の生データ（1行1フレーム）。**これが一次データ**。
-- `labels.csv` … `loc_rubric.compose_loc` で合成した LoC（`frame,LoC`）。**派生物**。
+- `attributes.jsonl` … qwen が返した段階（level）と属性の生データ（1行1フレーム）。**これが一次データ**。
+- `labels.csv` … `loc_rubric.compose_loc` で「段階 + 属性の加減点」を合成した LoC（`frame,LoC`）。**派生物**。
+
+段階を持たない古いレコード（schema_version 1、1〜5のLoC）は合成できないので、
+labels.csv には入らず、再開時にも「評価済み」とみなさずに評価し直す（新しい行が後ろに
+追記され、読み込み時は同じフレームの後ろの行が優先される）。
 
 合成ルールを変えたくなったら `--recompose` を使う。qwen を呼び直さずに
 `attributes.jsonl` から `labels.csv` を作り直せる（これが属性を保存する最大の利点）。
@@ -138,10 +142,17 @@ def compose_labels_from_attributes(input_dir: str, files: Sequence[str]) -> List
     """attributes.jsonl から labels.csv を組み立てて書き出し、評価点を返す。"""
     records = load_attributes(os.path.join(input_dir, ATTRIBUTES_FILENAME))
     points: List[Tuple[int, float]] = []
+    outdated = 0
     for frame in sorted(records):
-        loc = compose_loc(records[frame].get('attributes', {}))
+        record = records[frame]
+        if record.get('schema_version') != SCHEMA_VERSION:
+            outdated += 1
+            continue
+        loc = compose_loc(record.get('attributes', {}), record.get('level'))
         if loc is not None:
             points.append((frame, loc))
+    if outdated:
+        logging.warning(f"段階を持たない古いレコード {outdated} 件を除外しました（評価し直してください）")
 
     all_frames = sorted(filter(None, (extract_frame_number(f) for f in files)))
     rows = interpolate_labels(points, all_frames)
@@ -160,16 +171,20 @@ def compute_attributes_for_images(
     simulate: bool = False,
     skip_warmup: bool = True,
     resume: bool = True,
+    interval: float = 5,
 ) -> int:
     """stride ごとに属性を判定し、attributes.jsonl へ追記する。新たに評価した件数を返す。"""
     attributes_path = os.path.join(input_dir, ATTRIBUTES_FILENAME)
     done = load_attributes(attributes_path) if resume else {}
+    # 古いスキーマ（段階なし）のレコードは評価済みとみなさない
+    done = {frame: record for frame, record in done.items()
+            if record.get('schema_version') == SCHEMA_VERSION}
     if done:
         logging.info(f"既存の属性 {len(done)} 件をスキップします（再開）")
 
     if simulate:
         qwen = None
-        context_offsets = tuple(offsets) if offsets else (-12, -6, -3, -1, 0)
+        context_offsets = tuple(offsets) if offsets else (-12, -6, -2, -1, 0)
     else:
         import importlib
         qwen = importlib.import_module('qwen3_5')
@@ -199,25 +214,33 @@ def compute_attributes_for_images(
                 'writing_increased': True, 'page_turned': False,
                 'material_open': True, 'device_in_use': 'none',
                 'head_posture': NOT_VISIBLE, 'note': '', 'samples': 1,
+                'level': 75, 'level_reason': '',
             }
         else:
             context = qwen.build_context_paths(
                 [os.path.abspath(os.path.join(input_dir, f)) for f in files],
                 index, context_offsets,
             )
+            # 窓が欠けている（--keep-warmup の先頭）ときは、何秒前かの説明を付けない
+            used_offsets = context_offsets if len(context) == len(set(context_offsets)) else None
             try:
                 attributes = qwen.evaluate_attributes(
-                    context, model=model or qwen.DEFAULT_MODEL, samples=samples)
+                    context, model=model or qwen.DEFAULT_MODEL, samples=samples,
+                    offsets=used_offsets, interval=interval)
             except Exception as exc:
                 logging.error(f"frame {frame_number} の判定に失敗: {exc}")
                 continue
 
         note = attributes.pop('note', '')
         sample_count = attributes.pop('samples', 1)
-        loc = compose_loc(attributes)
+        level = attributes.pop('level', None)
+        level_reason = attributes.pop('level_reason', '')
+        loc = compose_loc(attributes, level)
         append_attributes(attributes_path, {
             'frame': frame_number,
             'schema_version': SCHEMA_VERSION,
+            'level': level,
+            'level_reason': level_reason,
             'attributes': attributes,
             'note': note,
             'samples': sample_count,
@@ -230,7 +253,8 @@ def compute_attributes_for_images(
             speed = elapsed / max(1, evaluated)
             remaining = (len(targets) - order) * speed
             logging.info(
-                f"{order}/{len(targets)} frame={frame_number} LoC={loc if loc is None else round(loc, 2)} "
+                f"{order}/{len(targets)} frame={frame_number} 段階={level} "
+                f"LoC={loc if loc is None else round(loc, 1)} "
                 f"({speed:.1f}秒/件, 残り約{remaining / 60:.0f}分)"
             )
 
@@ -247,7 +271,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help='同じ入力を何回サンプリングして多数決を取るか（既定1）')
     parser.add_argument('--model', '-m', default=None, help='Ollama のモデル名')
     parser.add_argument('--offsets', default=None,
-                        help='文脈フレームのオフセットをカンマ区切りで指定（既定 -12,-6,-3,-1,0）')
+                        help='文脈フレームのオフセットをカンマ区切りで指定'
+                             '（既定 -12,-6,-2,-1,0 ＝ 5秒間隔で -60/-30/-10/-5/0 秒）')
+    parser.add_argument('--interval', type=float, default=5,
+                        help='フレームの切り出し間隔（秒）。段階判定のプロンプトで何秒前の画像かを伝える')
     parser.add_argument('--simulate', action='store_true', help='qwen を呼ばずにダミー属性を書く')
     parser.add_argument('--recompose', action='store_true',
                         help='再推論せず attributes.jsonl から labels.csv を作り直すだけ')
@@ -272,6 +299,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             input_dir, files, offsets=offsets, stride=args.stride, samples=args.samples,
             model=args.model, simulate=args.simulate,
             skip_warmup=not args.keep_warmup, resume=not args.no_resume,
+            interval=args.interval,
         )
 
     compose_labels_from_attributes(input_dir, files)

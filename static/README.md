@@ -5,7 +5,7 @@
 Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 **LoC（Level of Concentration：集中度、0〜100）** を推定し、リアルタイムに表示すること。
 このリポジトリはフロントエンドだけで、LoC を推定するモデルは別（`../LoC/`）で動かす想定です。
-現時点では **モックの LoC** で一通り動くようになっています。
+`../LoC/server.py` を起動すると学習済みモデルの LoC が、起動していなければモックの LoC が表示されます。
 
 - HTML / CSS / Vanilla JavaScript のみ（React などのフレームワーク・ビルドツールなし）
 - グラフ描画のみ [Chart.js](https://www.chartjs.org/) を CDN から読み込み
@@ -18,6 +18,19 @@ Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 
 カメラ（`getUserMedia`）はセキュアなオリジンでしか使えないため、
 **ファイルを直接開くのではなく `localhost` で動かしてください。**
+
+**学習済みモデルで LoC を出す場合**（推奨）。推論サーバーがこのフロントも配信します。
+
+```powershell
+cd C:\Users\morii\develop\Online_Study_Room
+LoC\.venv\Scripts\python.exe LoC\server.py
+```
+
+ブラウザで <http://localhost:8000/> を開き、「記録する」→ 教材 → 「LoC計測を開始」。
+最初の LoC が出るまで約60秒かかります（その間は「準備中 n/12」と表示）。
+カメラは学習データと同じく**机の真上〜斜め上から手元を写す**向きにしてください。
+
+**フロントだけ動かす場合**（推論サーバーなし。接続に失敗して自動でモックに切り替わる）
 
 ```powershell
 cd C:\Users\morii\develop\Online_Study_Room\static
@@ -115,13 +128,18 @@ static/
 { "type": "loc", "timestamp": 1758512345900, "loc": 73 }
 ```
 
+```json
+{ "type": "warmup", "timestamp": 1758512345900, "remaining": 12, "total": 20, "seconds": 60 }
+```
+
+- `warmup` … モデルは直近12サンプル（5秒間隔＝約60秒ぶん）がたまるまで LoC を出せないので、その間の進み具合
+
 - `loc` は 0〜100 の数値
 - `type` が `loc` 以外のメッセージ、JSON でないメッセージは無視される
 
-> `../LoC/infer.py` のモデルは LoC を 1〜5 で出すので、
-> サーバー側で `(値 - 1) / 4 * 100` のように 0〜100 へ変換してから返してください。
-> また `infer.py` は学習時と同じサンプリング間隔を前提にしているため、
-> `LOC_CONFIG.fps` とサーバー側の処理間隔を合わせる必要があります。
+> サーバーは `../LoC/server.py`。モデルはフロントと同じ 0〜100 の LoC を出すので、そのまま（小数第1位に丸めて）返します。
+> 送られてきたフレームのうち推論に使うのは、`timestamp` で5秒（学習時の `--rate`）おきの1枚だけです。
+> そのため `LOC_CONFIG.fps` は 0.2 以上なら何でもよく、LoC が届くのも5秒ごとです。
 
 ### モック
 
@@ -134,7 +152,7 @@ static/
 
 ```js
 export const LOC_CONFIG = {
-  mode: "mock",   // "mock" … モック / "live" … 推論サーバーに接続
+  mode: "live",   // "mock" … モック / "live" … 推論サーバーに接続
   url: "ws://localhost:8765/loc",
   fps: 5,
   ...
@@ -145,11 +163,11 @@ export const LOC_CONFIG = {
 
 | キー | 既定値 | 意味 |
 | --- | --- | --- |
-| `mode` | `"mock"` | `"mock"` / `"live"` の切り替え |
+| `mode` | `"live"` | `"mock"` / `"live"` の切り替え |
 | `url` | `ws://localhost:8765/loc` | 推論サーバーの接続先 |
 | `fps` | `5` | 1秒あたりに送るフレーム数 |
-| `frameWidth` | `320` | 送信する JPEG の横幅（px） |
-| `jpegQuality` | `0.6` | JPEG の品質（0〜1） |
+| `frameWidth` | `640` | 送信する JPEG の横幅（px）。小さいと手の検出が落ちる |
+| `jpegQuality` | `0.8` | JPEG の品質（0〜1） |
 | `connectTimeoutMs` | `4000` | 接続待ちの上限（ms） |
 | `mockIntervalMs` | `1000` | モックが LoC を返す間隔（ms） |
 | `autoFallbackToMock` | `true` | 接続失敗時に自動でモックへ切り替えるか |

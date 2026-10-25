@@ -36,7 +36,7 @@ from train import DEFAULT_CHECKPOINT
 
 
 class LoCPredictor:
-    """フレームを1枚ずつ与えると、窓が埋まり次第 LoC（1〜5）を返す推論器。
+    """フレームを1枚ずつ与えると、窓が埋まり次第 LoC（0〜100）を返す推論器。
 
     `HandFeatureExtractor` と同様にステートフル。別の映像に移るときは `reset()` を呼ぶ。
     """
@@ -50,7 +50,7 @@ class LoCPredictor:
             "cuda" if torch.cuda.is_available() else "cpu"
         )
         checkpoint = torch.load(Path(checkpoint_path), map_location=self.device)
-        self.seq_len = int(checkpoint.get("seq_len", 20))
+        self.seq_len = int(checkpoint.get("seq_len", 12))
         self.progress = 0
 
         self.model = build_model(dropout=float(checkpoint.get("dropout", 0.2)))
@@ -66,6 +66,11 @@ class LoCPredictor:
     def warmup_remaining(self) -> int:
         """窓が埋まるまでに、あと何フレーム必要か。"""
         return max(0, self.seq_len - len(self._image_buffer))
+
+    @property
+    def latest_hand_features(self) -> Optional[np.ndarray]:
+        """直近に投入したフレームの手指特徴（162次元）。まだ無ければ None。"""
+        return self._hand_buffer[-1] if self._hand_buffer else None
 
     def reset(self):
         """窓と速度計算の状態を捨てる（別の映像・別の被験者に移るとき）。"""
@@ -172,13 +177,13 @@ def run(
                 if loc is not None:
                     latest_loc = loc
                     predictor.progress += 1
-                    print(f"[{predictor.progress * interval + predictor.seq_len}s] LoC = {loc:.2f}", flush=True)
+                    print(f"[{predictor.progress * interval + predictor.seq_len}s] LoC = {loc:.1f}", flush=True)
                 else:
                     print(f"ウォームアップ中（あと {predictor.warmup_remaining} フレーム）",
                           flush=True)
 
                 if display:
-                    text = "LoC: --" if latest_loc is None else f"LoC: {latest_loc:.2f}"
+                    text = "LoC: --" if latest_loc is None else f"LoC: {latest_loc:.1f}"
                     cv2.putText(frame, text, (16, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
                                 (0, 255, 0), 3, cv2.LINE_AA)
                     cv2.imshow("LoC", frame)

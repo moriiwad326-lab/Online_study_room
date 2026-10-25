@@ -13,6 +13,11 @@ import * as store from "../store.js";
 
 export const meta = { title: "記録する" };
 
+/* LoC が低い状態が続いたときの自動一時停止 */
+const LOW_LOC = 15;              // これを下回ると「集中していない」とみなす
+const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一時停止する
+const RESUME_LOC = 30;           // 一時停止後、これ以上に戻ったら再開する
+
 export async function render(ctx) {
   // 教材IDが付いていれば計測画面、なければ一覧画面
   return ctx.param ? renderMeasure(ctx) : renderList(ctx);
@@ -177,14 +182,16 @@ function renderMeasure(ctx) {
 
           <!-- 右：タイマーと LoC -->
           <div>
-            <div class="u-small u-muted">経過時間</div>
+            <div class="u-small u-muted">継続時間</div>
             <div class="measure__timer tabular" data-timer>00:00:00</div>
+            <div class="u-small u-weak tabular">合計 <span data-total>00:00:00</span></div>
 
             <div class="measure__loc" style="margin-top:14px">
               ${gaugeHtml(0, 84, 8)}
               <div>
                 <div class="u-small u-muted">現在のLoC</div>
                 <div class="measure__loc-num loc-color is-loc-mid" data-loc-num>--</div>
+                <div class="u-small u-weak u-hidden" data-loc-warmup></div>
               </div>
             </div>
           </div>
@@ -199,6 +206,10 @@ function renderMeasure(ctx) {
           <button class="btn btn--ghost" type="button" data-act="pause">${icon("pause", 18)}一時停止</button>
           <button class="btn btn--danger" type="button" data-act="finish">${icon("stop", 18)}終了して記録</button>
         </div>
+        <div class="notice notice--warn u-hidden" data-auto-paused style="margin-top:12px">
+          LoCが${LOW_LOC}未満の状態が${LOW_LIMIT_SEC / 60}分続いたため、計測を一時停止しています。<br>
+          LoCが${RESUME_LOC}以上に戻ると自動で再開します。
+        </div>
         <div data-measure-error style="margin-top:12px"></div>
       </section>
     </div>
@@ -206,8 +217,12 @@ function renderMeasure(ctx) {
 
   /* ---- 画面の状態 ---- */
   const state = {
-    elapsedSec: 0,      // 一時停止中は増えない
-    paused: false,
+    elapsedSec: 0,      // 継続時間。一時停止中は増えず、自動一時停止でリセットされる
+    totalSec: 0,        // 記録する学習時間。一時停止中は増えない
+    paused: false,      // 手動の一時停止（終了確認中も含む）
+    autoPaused: false,  // LoC が低い状態が続いたことによる一時停止
+    lastLoc: null,      // 直近に受け取った LoC
+    lowSec: 0,          // LoC が LOW_LOC 未満のまま経過した秒数
     running: false,
     locSamples: [],     // 受け取った LoC をすべて残し、終了時の平均に使う
     stream: null,       // カメラの MediaStream
@@ -225,6 +240,9 @@ function renderMeasure(ctx) {
   const locNum = q("[data-loc-num]");
   const timerEl = q("[data-timer]");
   const statusEl = q("[data-status]");
+  const warmupEl = q("[data-loc-warmup]");
+  const totalEl = q("[data-total]");
+  const autoPausedEl = q("[data-auto-paused]");
 
   /* ---- 同意チェックで開始ボタンを有効化 ---- */
   const consent = q("[data-consent]");
@@ -241,7 +259,7 @@ function renderMeasure(ctx) {
     // 1) カメラを起動する。失敗したら手動記録にフォールバックする。
     try {
       state.stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
       video.srcObject = state.stream;
@@ -264,24 +282,59 @@ function renderMeasure(ctx) {
       onLoc: ({ loc }) => {
         if (state.paused) return;
         const v = clampLoc(loc);
-        state.locSamples.push(v);
+        state.lastLoc = v;
+        warmupEl.classList.add("u-hidden");
+
+        // 自動一時停止中も LoC は受け取り続け、戻ったら再開する
+        if (state.autoPaused && v >= RESUME_LOC) setAutoPaused(false);
+        // 一時停止中の LoC は学習中のものではないので平均には入れない
+        if (!state.autoPaused) state.locSamples.push(v);
 
         updateGauge(gauge, v);
         locNum.textContent = v;
         locNum.className = `measure__loc-num loc-color ${locLevelClass(v)}`;
-        state.chart.push(v, formatClock(state.elapsedSec));
+        state.chart.push(v, formatClock(state.totalSec));
       },
       onStatus: (status, detail) => updateStatus(status, detail),
+      // 推論サーバーは直近の映像が一定量たまるまで LoC を出せないので、その間の進み具合を出す
+      onWarmup: ({ remaining, total, seconds }) => {
+        if (remaining <= 0) return;
+        warmupEl.textContent = `準備中 ${total - remaining}/${total}（最初のLoCまで約${seconds}秒）`;
+        warmupEl.classList.remove("u-hidden");
+      },
     });
     state.client.start({ video });
 
     // 5) 経過時間のカウント
     state.timer = setInterval(() => {
-      if (state.paused) return;
+      if (state.paused || state.autoPaused) return;
+
+      // LoC が低いまま一定時間たったら、継続時間をリセットして一時停止する
+      state.lowSec = state.lastLoc !== null && state.lastLoc < LOW_LOC ? state.lowSec + 1 : 0;
+      if (state.lowSec >= LOW_LIMIT_SEC) {
+        setAutoPaused(true);
+        return;
+      }
+
       state.elapsedSec += 1;
-      timerEl.textContent = formatClock(state.elapsedSec);
+      state.totalSec += 1;
+      renderTimers();
     }, 1000);
   });
+
+  /** LoC による自動一時停止の切り替え */
+  function setAutoPaused(on) {
+    state.autoPaused = on;
+    state.lowSec = 0;
+    if (on) state.elapsedSec = 0;
+    autoPausedEl.classList.toggle("u-hidden", !on);
+    renderTimers();
+  }
+
+  function renderTimers() {
+    timerEl.textContent = formatClock(state.elapsedSec);
+    totalEl.textContent = formatClock(state.totalSec);
+  }
 
   /* ---- 一時停止・再開 ---- */
   const pauseBtn = q('[data-act="pause"]');
@@ -312,7 +365,7 @@ function renderMeasure(ctx) {
     state.paused = true;
     state.client?.pause();
 
-    const durationMin = Math.max(1, Math.round(state.elapsedSec / 60));
+    const durationMin = Math.max(1, Math.round(state.totalSec / 60));
     const avgLoc = state.locSamples.length ? Math.round(average(state.locSamples)) : null;
 
     const ok = await openModal({
@@ -364,6 +417,7 @@ function renderMeasure(ctx) {
     if (status === LOC_STATUS.LIVE) statusEl.classList.add("status--live");
     if (status === LOC_STATUS.MOCK) statusEl.classList.add("status--mock");
     if (status === LOC_STATUS.ERROR) statusEl.classList.add("status--error");
+    if (status !== LOC_STATUS.LIVE) warmupEl.classList.add("u-hidden");
 
     const box = q("[data-measure-error]");
     if (status === LOC_STATUS.ERROR) {
