@@ -45,7 +45,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from loc_rubric import NOT_VISIBLE, SCHEMA_VERSION, compose_loc
+from loc_rubric import NOT_VISIBLE, SCHEMA_VERSION, compose_loc, force_absent_to_zero
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 ATTRIBUTES_FILENAME = 'attributes.jsonl'
@@ -139,9 +139,13 @@ def write_labels_csv(output_path: str, rows: Sequence[Tuple[int, Optional[float]
 
 
 def compose_labels_from_attributes(input_dir: str, files: Sequence[str]) -> List[Tuple[int, float]]:
-    """attributes.jsonl から labels.csv を組み立てて書き出し、評価点を返す。"""
+    """attributes.jsonl から labels.csv を組み立てて書き出し、評価点を返す。
+
+    補間した後で、人が直近60秒（12フレーム）写っていない区間を 0 に固定する。
+    """
     records = load_attributes(os.path.join(input_dir, ATTRIBUTES_FILENAME))
     points: List[Tuple[int, float]] = []
+    presence: Dict[int, bool] = {}
     outdated = 0
     for frame in sorted(records):
         record = records[frame]
@@ -151,13 +155,27 @@ def compose_labels_from_attributes(input_dir: str, files: Sequence[str]) -> List
         loc = compose_loc(record.get('attributes', {}), record.get('level'))
         if loc is not None:
             points.append((frame, loc))
+        visible = record.get('attributes', {}).get('person_visible', NOT_VISIBLE)
+        if isinstance(visible, bool):
+            presence[frame] = visible
     if outdated:
-        logging.warning(f"段階を持たない古いレコード {outdated} 件を除外しました（評価し直してください）")
+        logging.warning(f"古いスキーマのレコード {outdated} 件を除外しました（評価し直してください）")
 
-    all_frames = sorted(filter(None, (extract_frame_number(f) for f in files)))
+    all_frames = sorted({n for n in (extract_frame_number(f) for f in files) if n is not None})
     rows = interpolate_labels(points, all_frames)
+
+    # 不在ルールは「フレーム数」の窓で判定するので、フレーム番号を通し番号に直す
+    position_of = {frame: position for position, frame in enumerate(all_frames)}
+    forced = force_absent_to_zero(
+        [(position_of[frame], loc) for frame, loc in rows],
+        {position_of[frame]: visible for frame, visible in presence.items() if frame in position_of},
+    )
+    zeroed = sum(1 for (_, before), (_, after) in zip(rows, forced) if after != before)
+    rows = [(frame, loc) for (frame, _), (_, loc) in zip(rows, forced)]
+
     write_labels_csv(os.path.join(input_dir, LABELS_FILENAME), rows)
-    logging.info(f"{len(points)} 件の評価点から {len(rows)} 行の labels.csv を書き出しました")
+    logging.info(f"{len(points)} 件の評価点から {len(rows)} 行の labels.csv を書き出しました"
+                 f"（不在で 0 に固定: {zeroed} 行）")
     return points
 
 
@@ -209,7 +227,7 @@ def compute_attributes_for_images(
 
         if simulate:
             attributes = {
-                'hands_in_frame': 2, 'phone': 'absent', 'pen_held': True,
+                'person_visible': True, 'hands_in_frame': 2, 'phone': 'absent', 'pen_held': True,
                 'pen_tip_on_paper': True, 'hand_on_material': True,
                 'writing_increased': True, 'page_turned': False,
                 'material_open': True, 'device_in_use': 'none',

@@ -3,6 +3,10 @@
 `build_features.py` が学習時に行うのと同じ前処理（ConvNeXt 768次元 + Hands 162次元）を
 1フレームずつ行い、直近 seq_len フレームぶんを LSTM に流して LoC を出す。
 
+人が直近 seq_len フレーム（既定12 = 60秒）すべてで写っていなければ、モデルを通さず
+LoC を 0 にする（`presence.py` の在席判定器。チェックポイントが無ければこのルールは無効）。
+ラベル側の `loc_rubric.force_absent_to_zero` と同じルール。
+
 重要: 手の速度特徴は「直前に処理したフレームとの差分」なので、**学習時のサンプリング
 間隔（dataset_creation の --rate）と推論時の間隔を揃える**こと。揃えないと速度成分の
 スケールが変わり、そのまま精度に効く。`--interval` で秒間隔を指定する。
@@ -31,7 +35,8 @@ import torch
 
 from ConvNeXT.image_feature_extractor import ImageFeatureExtractor
 from MediaPipe_Hands.hand_feature_extractor import HandFeatureExtractor
-from core import build_model
+from core import LOC_MIN, build_model
+from presence import DEFAULT_PRESENCE_CHECKPOINT, PresenceGate
 from train import DEFAULT_CHECKPOINT
 
 
@@ -45,6 +50,7 @@ class LoCPredictor:
         self,
         checkpoint_path: str | Path = DEFAULT_CHECKPOINT,
         device: Optional[str] = None,
+        presence_path: Optional[str | Path] = DEFAULT_PRESENCE_CHECKPOINT,
     ):
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -62,6 +68,13 @@ class LoCPredictor:
         self._image_buffer: deque = deque(maxlen=self.seq_len)
         self._hand_buffer: deque = deque(maxlen=self.seq_len)
 
+        self.presence: Optional[PresenceGate] = None
+        if presence_path is not None and Path(presence_path).exists():
+            self.presence = PresenceGate(presence_path, self.seq_len, self.device)
+        elif presence_path is not None:
+            print(f"在席判定器が見つからないため、不在時の 0 固定は無効です: {presence_path}",
+                  flush=True)
+
     @property
     def warmup_remaining(self) -> int:
         """窓が埋まるまでに、あと何フレーム必要か。"""
@@ -77,14 +90,20 @@ class LoCPredictor:
         self._image_buffer.clear()
         self._hand_buffer.clear()
         self.hand_extractor.reset()
+        if self.presence is not None:
+            self.presence.reset()
 
     def push(self, frame_bgr: np.ndarray) -> Optional[float]:
         """1フレーム投入する。窓が埋まっていなければ None を返す。"""
-        self._image_buffer.append(self.image_extractor.extract(frame_bgr))
+        image_feature = self.image_extractor.extract(frame_bgr)
+        self._image_buffer.append(image_feature)
         self._hand_buffer.append(self.hand_extractor.extract(frame_bgr))
+        absent = self.presence is not None and self.presence.push(image_feature)
 
         if len(self._image_buffer) < self.seq_len:
             return None
+        if absent:
+            return LOC_MIN
 
         img_feat = torch.from_numpy(np.stack(self._image_buffer)).unsqueeze(0).to(self.device)
         hand_feat = torch.from_numpy(np.stack(self._hand_buffer)).unsqueeze(0).to(self.device)

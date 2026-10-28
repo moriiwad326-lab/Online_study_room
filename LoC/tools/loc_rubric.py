@@ -32,16 +32,27 @@
 写ったり写らなかったりする。**写っていないものを判定させるとノイズになる**ので、すべての
 属性は "not_visible" を取れる。加減点は観測できた証拠だけで正規化するため、画角が違っても
 加減点のスケールが揃う。
+
+## 不在が続いたら 0 に固定する
+
+`person_visible`（手・腕・頭のどれかが写っているか）が直近 `ABSENCE_WINDOW` フレーム
+（5秒間隔で60秒＝LSTM の窓と同じ長さ）の評価点ですべて false なら、段階や加減点に
+かかわらず LoC を 0 にする（`force_absent_to_zero`）。旧方式では無人の机に段階100が
+付く事故があった（「手が止まっていても無駄な動きが一切ない」を qwen が無人に当てはめた）。
+MediaPipe Hands の検出フラグは使わない。真上からの画角では書いている最中の手でも
+約半分を見逃し、勉強中の窓の24%が「12フレーム手が無い」になってしまうため（実測）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+import bisect
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # 属性スキーマのバージョン。attributes.jsonl に記録する。
 # 属性を足し引きしたら必ず上げること（古いデータと混ぜるときの判定に使う）。
 # 2: qwen の段階判定（level）を追加し、LoC を 0〜100 にした
-SCHEMA_VERSION = 2
+# 3: person_visible を追加し、不在が続く区間を 0 に固定するようにした
+SCHEMA_VERSION = 3
 
 NOT_VISIBLE = "not_visible"
 
@@ -54,8 +65,14 @@ LEVELS = (0, 25, 40, 75, 100)
 # 属性ルーブリックで段階から動かせる幅（±）
 ADJUST_RANGE = 25.0
 
+# この長さ（フレーム数）の窓で人が一度も写っていなければ LoC を 0 にする。
+# LSTM の窓（seq_len=12）と同じ = 5秒間隔で60秒
+ABSENCE_WINDOW = 12
+
 # 属性名 -> 許容値。bool 属性は True/False/not_visible を取る。
 ATTRIBUTE_SPEC: Dict[str, Tuple[Any, ...]] = {
+    # 人の体の一部（手・腕・頭・上半身のどれか）が写っているか。無人の机なら False
+    "person_visible": (True, False, NOT_VISIBLE),
     # 机の上に写っている手の数。0なら離席か手を引っ込めている
     "hands_in_frame": (0, 1, 2, NOT_VISIBLE),
     # スマホ。机上にあるだけでも誘惑源、手に持っていれば非学習
@@ -304,6 +321,32 @@ def compose_loc(attributes: Dict[str, Any], level: Any) -> Optional[float]:
     return max(LOC_MIN, min(LOC_MAX, base + adjustment))
 
 
+def force_absent_to_zero(
+    rows: Sequence[Tuple[int, float]],
+    presence: Dict[int, bool],
+    window: int = ABSENCE_WINDOW,
+) -> List[Tuple[int, float]]:
+    """直近 window フレームの評価点で人が一度も写っていなければ LoC を 0 にする。
+
+    rows:     (フレームの位置, LoC) のリスト。位置は動画内のフレームの通し番号（0始まり）
+    presence: {フレームの位置: 写っているか}。在席を判定できた評価点だけを入れる
+
+    窓が埋まらない先頭（位置 < window-1）と、窓の中に判定できた評価点が1つも無い
+    ところは元の値を残す。stride で間引いた評価でも、窓の中の評価点だけで判断する。
+    """
+    observed = sorted(presence)
+    forced: List[Tuple[int, float]] = []
+    for position, loc in rows:
+        if position >= window - 1:
+            start = bisect.bisect_left(observed, position - window + 1)
+            end = bisect.bisect_right(observed, position)
+            in_window = [presence[p] for p in observed[start:end]]
+            if in_window and not any(in_window):
+                loc = LOC_MIN
+        forced.append((position, loc))
+    return forced
+
+
 def describe_rubric() -> str:
     """ルーブリックを人が読める形で返す（デバッグ・ドキュメント用）。"""
     lines = [f"段階: {' / '.join(str(level) for level in LEVELS)}"]
@@ -316,6 +359,7 @@ def describe_rubric() -> str:
     lines += ["減点:"]
     lines += [f"  -{w:.2f}  {n}" for n, w, _ in NEGATIVE_RUBRIC]
     lines += [f"加減点 = ±{ADJUST_RANGE:.0f} × clamp(中核の充足率 + ボーナス − 減点の合計(≦1), −1, 1)"]
+    lines += [f"不在: 直近{ABSENCE_WINDOW}フレームで person_visible がすべて false なら 0"]
     return "\n".join(lines)
 
 
@@ -326,11 +370,13 @@ __all__ = [
     "LOC_MAX",
     "LEVELS",
     "ADJUST_RANGE",
+    "ABSENCE_WINDOW",
     "ATTRIBUTE_SPEC",
     "ATTRIBUTE_NAMES",
     "normalize_attributes",
     "normalize_level",
     "compose_adjustment",
     "compose_loc",
+    "force_absent_to_zero",
     "describe_rubric",
 ]

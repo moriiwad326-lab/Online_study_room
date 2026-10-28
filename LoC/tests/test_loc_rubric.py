@@ -20,6 +20,7 @@ from loc_rubric import (
     NOT_VISIBLE,
     compose_adjustment,
     compose_loc,
+    force_absent_to_zero,
     normalize_attributes,
     normalize_level,
 )
@@ -234,3 +235,49 @@ def test_score_stays_in_range_with_mostly_invisible_attributes():
     loc = compose_loc(sparse, 40)
 
     assert loc is not None and 40 <= loc <= 40 + ADJUST_RANGE
+
+
+# --- 不在が続いたら 0 に固定する ---
+
+
+def test_person_visible_is_part_of_the_schema():
+    normalized = normalize_attributes({'person_visible': 'false'})
+
+    assert normalized['person_visible'] is False
+
+
+def test_absent_for_a_full_window_is_forced_to_zero():
+    rows = [(position, 80.0) for position in range(20)]
+    presence = {position: False for position in range(0, 20, 2)}  # stride 2 の評価点
+
+    forced = dict(force_absent_to_zero(rows, presence, window=12))
+
+    assert forced[11] == 0.0
+    assert forced[19] == 0.0
+
+
+def test_window_that_is_not_full_yet_keeps_the_label():
+    rows = [(position, 80.0) for position in range(12)]
+    presence = {position: False for position in range(12)}
+
+    forced = dict(force_absent_to_zero(rows, presence, window=12))
+
+    assert forced[10] == 80.0  # 先頭は窓が埋まらないので判定しない
+    assert forced[11] == 0.0
+
+
+def test_one_sighting_in_the_window_keeps_the_label():
+    rows = [(position, 60.0) for position in range(30)]
+    presence = {position: False for position in range(0, 30, 2)}
+    presence[14] = True  # 窓の途中で一度でも写っていれば離席とはみなさない
+
+    forced = dict(force_absent_to_zero(rows, presence, window=12))
+
+    assert forced[25] == 60.0  # 14 が窓 [14, 25] に入る
+    assert forced[26] == 0.0   # 窓 [15, 26] には不在しかない
+
+
+def test_unknown_presence_never_forces_zero():
+    rows = [(position, 50.0) for position in range(20)]
+
+    assert force_absent_to_zero(rows, {}, window=12) == rows
