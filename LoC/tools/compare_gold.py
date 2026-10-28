@@ -1,8 +1,9 @@
 """人手のゴールド集合（gold/gold.csv）と、qwen のラベルの一致度を測る。
 
 ラベリング方式（プロンプト・合成ルール）を変えたら、ここで新旧を並べて比べる。
-ゴールドは私（人）が「現在の画像 + 直前4枚」を見て、段階（0 / 25 / 40 / 75 / 100）と
-人が写っているかを付けたもの。
+ゴールドは私（人）が「現在の画像 + 直前4枚」を見て、段階と人が写っているかを付けたもの。
+段階は旧スケール（0 / 25 / 40 / 75 / 100）で付けてある。現在の qwen は 0 / 20 / 40 / 70 / 100
+で答え、加点も無いので、ゴールド 75 のフレームは最高でも 70 になり MAE に 5 点の下駄が乗る。
 
     python compare_gold.py output                       # labels.csv を比べる
     python compare_gold.py output --labels labels.csv labels_v2.csv
@@ -10,7 +11,7 @@
 出力する指標:
 - LoC の MAE … ゴールドの段階を正解の LoC とみなした平均絶対誤差
 - 不在の0率 … ゴールドで「無人・突っ伏し（段階0）」のフレームで LoC が 10 未満になった割合
-- 在席の誤0 … ゴールドで学習中（段階75以上）なのに LoC が 10 未満になった割合
+- 在席の誤0 … ゴールドで学習中（段階70以上）なのに LoC が 10 未満になった割合
 - person_visible の一致率 … attributes.jsonl の qwen 判定（新スキーマのみ）
 """
 
@@ -68,7 +69,7 @@ def summarize(pairs: List[Tuple[Dict, float]]) -> Dict[str, Optional[float]]:
     if not pairs:
         return {'n': 0}
     absent = [loc for gold, loc in pairs if gold['level'] == 0]
-    studying = [loc for gold, loc in pairs if gold['level'] >= 75]
+    studying = [loc for gold, loc in pairs if gold['level'] >= 70]
     return {
         'n': len(pairs),
         'mae': sum(abs(gold['level'] - loc) for gold, loc in pairs) / len(pairs),

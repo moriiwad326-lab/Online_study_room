@@ -1,7 +1,7 @@
 """属性スキーマと LoC 合成ルール（tools/loc_rubric.py）を検証する。
 
 ラベルの質がモデルの精度を直接決めるので、合成ルールの性質はテストで固定しておく:
-- LoC = qwen の段階 + 属性の加減点（±25）で、0〜100 に収まること
+- LoC = qwen の段階 − 属性の減点（0〜20）で、0〜100 に収まること。属性で加点はしない
 - 写っていない属性（not_visible）が値を歪めないこと
 - 非学習の属性は強い減点になるが、qwen の段階判定を上書きしないこと
 """
@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 
 from loc_rubric import (
-    ADJUST_RANGE,
+    MAX_PENALTY,
     ATTRIBUTE_NAMES,
     LEVELS,
     NOT_VISIBLE,
@@ -86,14 +86,14 @@ def test_none_is_a_valid_value_only_for_device():
 
 
 def test_levels_are_anchored_on_forty():
-    assert LEVELS == (0, 25, 40, 75, 100)
+    assert LEVELS == (0, 20, 40, 70, 100)
 
 
 @pytest.mark.parametrize('raw, expected', [
-    (75, 75), ('40', 40), (' 100 ', 100), (0, 0),
-    (50, 40),   # 半端な値は最も近い段階へ寄せる（50 は 40 と 75 のうち 40 に近い）
-    (60, 75),
-    (30, 25),
+    (70, 70), ('40', 40), (' 100 ', 100), (0, 0),
+    (50, 40),   # 半端な値は最も近い段階へ寄せる（50 は 40 と 70 のうち 40 に近い）
+    (60, 70),
+    (15, 20),
 ])
 def test_level_is_snapped_to_the_nearest_step(raw, expected):
     assert normalize_level(raw) == expected
@@ -118,11 +118,11 @@ def test_nothing_observable_keeps_the_level():
 
 
 @pytest.mark.parametrize('level', LEVELS)
-def test_adjustment_is_within_25_points_of_the_level(level):
+def test_loc_is_at_most_20_points_below_the_level(level):
     for case in (attrs(), attrs(phone='in_hand', hands_in_frame=0, pen_held=False,
                                 hand_on_material=False, material_open=False)):
         loc = compose_loc(case, level)
-        assert abs(loc - level) <= ADJUST_RANGE
+        assert level - MAX_PENALTY <= loc <= level
         assert 0.0 <= loc <= 100.0
 
 
@@ -135,20 +135,22 @@ def test_never_exceeds_100_or_goes_below_0():
     assert compose_loc(worst, 0) == 0.0
 
 
-def test_full_evidence_adds_the_full_range():
+def test_attributes_never_add_points():
+    # 加点はしない。集中の高さは段階判定に任せる
     best = attrs(hands_in_frame=2, page_turned=True, head_posture='upright')
 
-    assert compose_loc(best, 40) == 40 + ADJUST_RANGE
+    assert compose_adjustment(best) == 0
+    assert compose_loc(best, 40) == 40
 
 
 # --- 非学習の属性は減点するが、段階判定を優先する ---
 
 
 def test_phone_in_hand_lowers_but_does_not_override_the_level():
-    with_phone = compose_loc(attrs(phone='in_hand'), 75)
+    with_phone = compose_loc(attrs(phone='in_hand'), 70)
 
-    assert with_phone < compose_loc(attrs(), 75)
-    assert with_phone >= 75 - ADJUST_RANGE  # 0 に決め打ちしない
+    assert with_phone < compose_loc(attrs(), 70)
+    assert with_phone >= 70 - MAX_PENALTY  # 0 に決め打ちしない
 
 
 def test_a_single_strong_negative_uses_the_full_range():
@@ -156,7 +158,7 @@ def test_a_single_strong_negative_uses_the_full_range():
     phone = attrs(phone='in_hand', pen_held=False, pen_tip_on_paper=False,
                   writing_increased=False, hand_on_material=False)
 
-    assert compose_adjustment(phone) == -ADJUST_RANGE
+    assert compose_adjustment(phone) == -MAX_PENALTY
 
 
 def test_head_down_lowers_the_score():
@@ -181,7 +183,7 @@ def test_away_is_not_rescued_by_claimed_progress():
 
 def test_hands_out_of_frame_while_holding_a_pen_is_not_treated_as_away():
     # 画角の端で手が切れていてもペンを握っていれば離席ではない
-    assert compose_adjustment(attrs(hands_in_frame=0, pen_held=True)) > 0
+    assert compose_adjustment(attrs(hands_in_frame=0, pen_held=True)) == 0
 
 
 def test_no_material_and_no_device_lowers_the_score():
@@ -193,10 +195,19 @@ def test_no_material_but_pc_in_use_is_not_penalised():
     pc = attrs(material_open=False, device_in_use='pc', pen_held=False,
                pen_tip_on_paper=False, writing_increased=False, hand_on_material=False)
 
-    assert compose_adjustment(pc) >= 0
+    assert compose_adjustment(pc) == 0
 
 
-# --- 証拠による加減点 ---
+def test_watching_a_device_with_hands_off_is_not_penalised():
+    # 講義動画を見ていて手が画面外でも、端末学習なら離席・停滞の減点を受けない
+    watching = attrs(hands_in_frame=0, material_open=False, device_in_use='tablet', pen_held=False,
+                     pen_tip_on_paper=False, writing_increased=False, hand_on_material=False)
+
+    assert compose_adjustment(watching) == 0
+    assert compose_loc(watching, 70) == 70
+
+
+# --- 非集中の証拠による減点 ---
 
 
 def test_stalled_hands_are_penalised():
@@ -211,11 +222,11 @@ def test_phone_on_desk_lowers_the_score():
     assert compose_loc(attrs(phone='on_desk'), 40) < compose_loc(attrs(phone='absent'), 40)
 
 
-def test_thinking_with_hand_on_material_is_a_small_adjustment():
-    # 書いてはいないが教材に手を置いて読んでいる＝段階からあまり動かさない
+def test_thinking_with_hand_on_material_is_not_penalised():
+    # 書いてはいないが教材に手を置いて読んでいる＝減点しない
     thinking = attrs(pen_tip_on_paper=False, writing_increased=False)
 
-    assert -5 <= compose_adjustment(thinking) <= 10
+    assert compose_adjustment(thinking) == 0
 
 
 # --- not_visible の扱い（画角の違いへの頑健性） ---
@@ -226,7 +237,7 @@ def test_invisible_attributes_do_not_drag_the_score():
     overhead = attrs(head_posture=NOT_VISIBLE, hands_in_frame=2, page_turned=True)
     frontal = attrs(head_posture='upright', hands_in_frame=2, page_turned=True)
 
-    assert compose_loc(overhead, 75) == compose_loc(frontal, 75)
+    assert compose_loc(overhead, 70) == compose_loc(frontal, 70)
 
 
 def test_score_stays_in_range_with_mostly_invisible_attributes():
@@ -234,7 +245,7 @@ def test_score_stays_in_range_with_mostly_invisible_attributes():
 
     loc = compose_loc(sparse, 40)
 
-    assert loc is not None and 40 <= loc <= 40 + ADJUST_RANGE
+    assert loc == 40
 
 
 # --- 不在が続いたら 0 に固定する ---
