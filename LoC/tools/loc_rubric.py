@@ -1,26 +1,38 @@
-"""LoC（集中度）の属性ラベル定義と、qwen の段階判定を属性で減点するルール。
+"""LoC（集中度）の属性ラベル定義と、qwen の段階判定を属性で加減点するルール。
 
 ## ラベルの作り方（2段構え）
 
-    5フレーム --qwen--> 段階（0 / 20 / 40 / 70 / 100）  … 画像だけから見た大づかみの状態
-    現在フレーム --qwen--> 属性（観測可能な事実）       … 非集中の証拠による減点
+    5フレーム --qwen--> 段階（10 / 30 / 50 / 70 / 90）  … 画像だけから見た大づかみの状態
+    現在フレーム --qwen--> 属性（観測可能な事実）       … 段階の中での細かい位置
                          ↓
-         LoC = 段階 − 属性ルーブリックの減点（0〜20、0〜100 でクリップ）
+         LoC = 段階 + 加点（0〜+10） − 減点（0〜25）   （0〜100 でクリップ）
 
-段階は「40（普通）」を軸にした非等間隔のスケール。0 は退出・居眠り、100 はフロー状態、
-70 / 20 はその中間で qwen が画像を見て柔軟に選ぶ（`qwen3_5.LEVEL_PROMPT` 参照）。
+段階は「50（普通）」を軸にした等間隔のスケール。10 は退出・居眠り、90 はフロー状態、
+70 / 30 はその中間で qwen が画像を見て柔軟に選ぶ（`qwen3_5.LEVEL_PROMPT` 参照）。
 
-属性は**減点にだけ**使い、加点はしない。集中しているかどうかは5フレームを見た段階判定に
-任せ、属性は1枚の静止画からでも確実に言える非集中の証拠（スマホ操作・突っ伏し等）で
-段階を割り引くだけにする。加点を入れると、紙で筆記している人ほど得をして、PC・タブレット
-での学習が相対的に低くなっていた（筆記の証拠が取れないため）。
+加点と減点で幅を変えてある（`MAX_BONUS` / `MAX_PENALTY`）。
+
+- **加点は小さく（最大 +10）**。紙で筆記している動画では学習の証拠が揃いやすく、加点の幅を
+  広げると段階70のフレームの多くが90前後まで押し上げられて上に固まった（IMG_7411 で ±20
+  のとき、122評価点中41点が90以上）。一方で加点を無くすとラベルが段階の値ちょうどに固まり、
+  段階の中の差が付かなかった（減点のみ −25 のとき、122評価点で9種類の値）。段階の間隔（20）の
+  半分に留め、加点では隣の段階を追い越さないようにする。
+- **減点は大きく（最大 −25）**。段階の間隔より大きいので、強い非集中の証拠があれば1つ下の
+  段階より低くなる。
+
+加点と減点は別々に計算して足す。1つの値に混ぜてから切り詰めると、筆記の証拠が揃っている
+フレームでスマホ操作の減点が打ち消されてしまう。0 と 100 は端の段階から加減点で届く値で、
+不在ルール（下記）だけが段階によらず LoC を 0 にする。
+
+どちらの幅も合成だけの値なので、変えても `--recompose` で再推論なしに作り直せる
+（`MAX_BONUS = 0` にすれば減点だけになる）。
 
 ## なぜ属性も聞くのか
 
 旧々方式（1〜5の総合判断だけ）はラベルが3と4に固まり、隣接フレームで45%もラベルが
 変わった。総合判断だけでは段階の中の差が付かず、段階の境目でラベルが跳ねる。そこで
 観測可能な事実（ペン先が紙に触れているか、スマホを手に持っているか等）で段階の中の
-位置を減点で付け、連続値の教師にする。
+位置を加減点し、連続値の教師にする。
 
 段階と属性の生データ（attributes.jsonl）を両方保存しておけば、合成式を変えても
 **再推論なしで全ラベルを作り直せる**（LoCは派生値にすぎない）。
@@ -35,13 +47,13 @@
 
 学習動画は真上の手元ショットから斜め上で上半身が一部入るものまで様々で、顔・視線は
 写ったり写らなかったりする。**写っていないものを判定させるとノイズになる**ので、すべての
-属性は "not_visible" を取れる。減点は観測できて当てはまった項目だけで付けるので、写って
-いない属性が値を歪めることはない。
+属性は "not_visible" を取れる。加減点は観測できた証拠だけで正規化するため、画角が違っても
+加減点のスケールが揃う。
 
 ## 不在が続いたら 0 に固定する
 
 `person_visible`（手・腕・頭のどれかが写っているか）が直近 `ABSENCE_WINDOW` フレーム
-（5秒間隔で60秒＝LSTM の窓と同じ長さ）の評価点ですべて false なら、段階や減点に
+（5秒間隔で60秒＝LSTM の窓と同じ長さ）の評価点ですべて false なら、段階や加減点に
 かかわらず LoC を 0 にする（`force_absent_to_zero`）。旧方式では無人の机に段階100が
 付く事故があった（「手が止まっていても無駄な動きが一切ない」を qwen が無人に当てはめた）。
 MediaPipe Hands の検出フラグは使わない。真上からの画角では書いている最中の手でも
@@ -58,18 +70,21 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # 2: qwen の段階判定（level）を追加し、LoC を 0〜100 にした
 # 3: person_visible を追加し、不在が続く区間を 0 に固定するようにした
 # 4: 段階を 0/20/40/70/100 にし、属性は減点（最大 −20）だけに使うようにした
-SCHEMA_VERSION = 4
+# 5: 段階を 10/30/50/70/90 の等間隔にし、属性の加減点に戻した
+#    （MAX_BONUS / MAX_PENALTY は合成だけの値なので変えても上げない。--recompose で作り直せる）
+SCHEMA_VERSION = 5
 
 NOT_VISIBLE = "not_visible"
 
 LOC_MIN = 0.0
 LOC_MAX = 100.0
 
-# qwen が画像から選ぶ段階。40（普通）を軸にした非等間隔のスケール
-LEVELS = (0, 20, 40, 70, 100)
+# qwen が画像から選ぶ段階。50（普通）を軸にした等間隔のスケール
+LEVELS = (10, 30, 50, 70, 90)
 
-# 属性ルーブリックで段階から引ける最大の点数
-MAX_PENALTY = 20.0
+# 属性ルーブリックで段階に足せる最大と、段階から引ける最大
+MAX_BONUS = 10.0
+MAX_PENALTY = 25.0
 
 # この長さ（フレーム数）の窓で人が一度も写っていなければ LoC を 0 にする。
 # LSTM の窓（seq_len=12）と同じ = 5秒間隔で60秒
@@ -158,20 +173,53 @@ def _visible(attributes: Dict[str, Any], name: str) -> bool:
 
 # ## ルーブリックの構造
 #
-# 非集中の証拠だけを並べ、当てはまった重みを足し上げる（上限1）。
+# 素朴に「加点項目を並べて合計を最大値で割る」とすると2つ壊れる。
 #
-#     減点 = MAX_PENALTY × min(当てはまった重みの合計, 1)
+# 1. 紙で勉強している人は `device_in_use` の加点を永久に取れないので満点に届かない。
+#    学習の形態（紙 / PC）が違うだけで不利になるのはおかしい。
+# 2. 「ページをめくっていない」は非集中の証拠ではないのに、分母に入ると減点として働く。
 #
-# 加点項目は持たない。以前は「筆記の証拠」を中核に加点していたが、PC・タブレットで学習
-# している人は筆記の証拠を取れず、紙で学習している人より一律に低くなっていた。集中の高さは
-# 段階判定に任せ、属性は段階を割り引く方向にだけ効かせる。
-# 減点を項目数で正規化しないのは、正規化すると項目が多いほど1つあたりが薄まり、スマホ操作が
-# 単独で −5点程度にしかならないため（実測で −11.8 / 離席 −10.3）。非集中の証拠は1つあれば
-# 十分なので、重み 1.0 の項目は単独で満幅（−20点）まで効かせる。
-# 重みは 1 を満幅とする単位（0.5 なら 20 × 0.5 = 10点）。
+# そこで項目を3種類に分ける。
 #
-# PC・タブレットでの学習は減点しない。「筆記していない」「紙の教材が無い」は端末で学習して
-# いれば当然なので、止まっている・教材が無いの2項目は端末を使っていれば当てはまらない。
+# - CORE    … 不在が意味を持つ中核の証拠。正規化の分母に入る。学習形態で切り替える
+# - BONUS   … 在れば加点、無くても減点にならない項目。分母に入らない
+# - NEGATIVE… 非集中の証拠。当てはまった重みを足し上げる（上限1）
+#
+#     加減点 = MAX_BONUS × min(中核の充足率 + ボーナス, 1) − MAX_PENALTY × min(減点の合計, 1)
+#
+# この分け方のおかげで、顔が写る動画と写らない動画、紙とPCで、加減点のスケールが揃う。
+# 減点だけは充足率で正規化しない。正規化すると減点項目が多いほど1つあたりが薄まり、
+# スマホ操作が単独で満幅の2割程度にしかならない（±25 のときの実測で −11.8 / 離席 −10.3）。
+# 非集中の証拠は1つあれば十分なので、重み 1.0 の項目は単独で満幅（−25点）まで効かせる。
+# 重みは 1 を満幅とする単位（ボーナス 0.2 なら 10 × 0.2 = 2点、減点 0.5 なら 25 × 0.5 = 12.5点）。
+
+# 紙での学習における中核の証拠
+PAPER_CORE = (
+    # 書き込みが増えた = 実際に学習が進んだ、最も強い証拠
+    ("writing_increased", 0.8, lambda a: a["writing_increased"] is True),
+    # ペン先が紙に触れている = 筆記中
+    ("pen_tip_on_paper", 0.5, lambda a: a["pen_tip_on_paper"] is True),
+    # ペンを握っている（筆記していなくても関与の証拠）
+    ("pen_held", 0.2, lambda a: a["pen_held"] is True),
+    # 手が教材の上にある = 読んでいる・考えている
+    ("hand_on_material", 0.2, lambda a: a["hand_on_material"] is True),
+)
+
+# 学習形態によらず効く中核の証拠（写っているときだけ）
+POSTURE_CORE = (
+    ("head_posture", 0.3, lambda a: a["head_posture"] == "upright"),
+)
+
+# 在れば加点、無くても減点にならない項目
+BONUS_RUBRIC = (
+    # PC・タブレットでの学習。真上からの画角では画面の中身まで見えないので、
+    # 「学習している」と断定はできない。加点はするが中核の証拠には使わない
+    ("device_in_use", 0.2, lambda a: a["device_in_use"] in ("pc", "tablet")),
+    # ページをめくった = 学習の進行
+    ("page_turned", 0.1, lambda a: a["page_turned"] is True),
+    # 両手が机にある（片手だけより作業密度が高い傾向）
+    ("hands_in_frame", 0.05, lambda a: a["hands_in_frame"] == 2),
+)
 
 NEGATIVE_RUBRIC = (
     # スマホを手に持って操作している（明らかな非学習行動）
@@ -229,29 +277,68 @@ def _negative_is_observable(attributes: Dict[str, Any], name: str) -> bool:
     return _visible(attributes, name)
 
 
-def compose_adjustment(attributes: Dict[str, Any]) -> Optional[float]:
-    """属性から減点（−MAX_PENALTY〜0）を計算する。減点項目が何も判定できなければ None。
+def _core_rubric(attributes: Dict[str, Any]):
+    """この学習形態で中核となる証拠を返す。
 
-    当てはまった減点項目の重みを足し上げる（上限1）。加点はしない。
+    PC・タブレットを使っているときは紙の証拠（筆記・ペン）を分母から外す。
+    外さないと「PCで学習中なのでペンを持っていない」が減点として働いてしまう。
+    """
+    if attributes["device_in_use"] in ("pc", "tablet"):
+        return POSTURE_CORE
+    return PAPER_CORE + POSTURE_CORE
+
+
+def _negative_total(attributes: Dict[str, Any]) -> Tuple[bool, float]:
+    """(減点項目を1つでも判定できたか, 当てはまった重みの合計（上限1）) を返す。"""
+    any_observable = False
+    negative = 0.0
+    for name, weight, condition in NEGATIVE_RUBRIC:
+        if not _negative_is_observable(attributes, name):
+            continue
+        any_observable = True
+        if condition(attributes):
+            negative += weight
+    return any_observable, min(1.0, negative)
+
+
+def compose_adjustment(attributes: Dict[str, Any]) -> Optional[float]:
+    """属性から加減点（−MAX_PENALTY〜+MAX_BONUS）を計算する。何も観測できなければ None。
+
+    中核の加点は**観測できた証拠の合計で正規化**する。写らない属性があっても値域が揃うので、
+    画角の違う動画どうしで加減点が比較できる。減点は観測できて当てはまったものの合計。
+    加点と減点は別々に上限を掛けてから足す（互いに打ち消して切り詰められないように）。
     """
     a = normalize_attributes(attributes)
 
-    any_negative_observable = False
-    negative = 0.0
-    for name, weight, condition in NEGATIVE_RUBRIC:
-        if not _negative_is_observable(a, name):
+    # ── 中核の証拠（観測できたものだけで正規化する）──
+    positive = possible_positive = 0.0
+    for name, weight, condition in _core_rubric(a):
+        if not _visible(a, name):
             continue
-        any_negative_observable = True
+        possible_positive += weight
         if condition(a):
-            negative += weight
+            positive += weight
 
-    if not any_negative_observable:
+    # ── ボーナス（在れば加点、無くても減点にならない）──
+    bonus = sum(
+        weight for name, weight, condition in BONUS_RUBRIC
+        if _visible(a, name) and condition(a)
+    )
+
+    # ── 非集中の証拠（当てはまった重みの合計、上限1）──
+    any_negative_observable, negative = _negative_total(a)
+
+    if possible_positive == 0.0 and not any_negative_observable and bonus == 0.0:
         return None
-    return -MAX_PENALTY * min(1.0, negative)
+
+    evidence = bonus
+    if possible_positive > 0:
+        evidence += positive / possible_positive
+    return MAX_BONUS * min(1.0, evidence) - MAX_PENALTY * negative
 
 
 def compose_loc(attributes: Dict[str, Any], level: Any) -> Optional[float]:
-    """qwen の段階から属性の減点を引いて LoC（0.0〜100.0の実数）を合成する。
+    """qwen の段階に属性の加減点を足して LoC（0.0〜100.0の実数）を合成する。
 
     段階が読めなければ None（ラベルを付けない）。属性が何も観測できなければ
     段階をそのまま使う。
@@ -292,9 +379,15 @@ def force_absent_to_zero(
 def describe_rubric() -> str:
     """ルーブリックを人が読める形で返す（デバッグ・ドキュメント用）。"""
     lines = [f"段階: {' / '.join(str(level) for level in LEVELS)}"]
+    lines += ["中核（紙）:"]
+    lines += [f"  +{w:.2f}  {n}" for n, w, _ in PAPER_CORE]
+    lines += ["中核（姿勢）:"]
+    lines += [f"  +{w:.2f}  {n}" for n, w, _ in POSTURE_CORE]
+    lines += ["ボーナス:"]
+    lines += [f"  +{w:.2f}  {n}" for n, w, _ in BONUS_RUBRIC]
     lines += ["減点:"]
-    lines += [f"  -{w * MAX_PENALTY:.0f}点  {n}" for n, w, _ in NEGATIVE_RUBRIC]
-    lines += [f"LoC = 段階 − {MAX_PENALTY:.0f} × min(減点の合計, 1)"]
+    lines += [f"  -{w:.2f}  {n}" for n, w, _ in NEGATIVE_RUBRIC]
+    lines += [f"加減点 = +{MAX_BONUS:.0f} × min(中核の充足率 + ボーナス, 1) − {MAX_PENALTY:.0f} × min(減点の合計, 1)"]
     lines += [f"不在: 直近{ABSENCE_WINDOW}フレームで person_visible がすべて false なら 0"]
     return "\n".join(lines)
 
@@ -305,6 +398,7 @@ __all__ = [
     "LOC_MIN",
     "LOC_MAX",
     "LEVELS",
+    "MAX_BONUS",
     "MAX_PENALTY",
     "ABSENCE_WINDOW",
     "ATTRIBUTE_SPEC",
