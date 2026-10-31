@@ -7,7 +7,7 @@
  * Chart.js は index.html で CDN から読み込んでいるので、ここでは window.Chart を使う。
  */
 
-import { cssVar, locColor, locLevelClass, clampLoc, formatDuration } from "./utils.js";
+import { cssVar, locColor, locLevel, locLevelClass, clampLoc, formatDuration } from "./utils.js";
 
 /** Chart.js 全体の既定値（フォントと色をアプリに合わせる） */
 function applyDefaults() {
@@ -129,10 +129,20 @@ export function drawSparkline(canvas, series) {
 /**
  * 計測中のリアルタイム折れ線グラフ。
  * 作ったあと pushLoc(値) を呼ぶと点が増え、直近 maxPoints 件だけ表示される。
+ * 線と塗りは区間ごとに、その区間の終点の LoC の色（数字・ゲージと同じ3段階）で描く。
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.overlay] カメラ映像の上に重ねる（軸・目盛りを明るく控えめにする）
  */
-export function createRealtimeLocChart(canvas, { maxPoints = 60 } = {}) {
+export function createRealtimeLocChart(canvas, { maxPoints = 60, overlay = false } = {}) {
   applyDefaults();
-  const primary = cssVar("--c-primary") || "#5b5bd6";
+
+  // 3段階の色は作成時に1回だけ読む（区間ごとに getComputedStyle を呼ばない）
+  const colors = { high: locColor(100), mid: locColor(50), low: locColor(0) };
+  const colorAt = (v) => colors[locLevel(v)];
+
+  const tickColor = overlay ? "rgba(255,255,255,.75)" : undefined;
+  const gridColor = overlay ? "rgba(255,255,255,.14)" : cssVar("--c-border");
 
   const chart = new window.Chart(canvas, {
     type: "line",
@@ -140,9 +150,13 @@ export function createRealtimeLocChart(canvas, { maxPoints = 60 } = {}) {
       labels: [],
       datasets: [{
         data: [],
-        borderColor: primary,
-        backgroundColor: primary + "22",
-        borderWidth: 2,
+        borderColor: colors.mid,
+        backgroundColor: colors.mid + "33",
+        segment: {
+          borderColor: (ctx) => colorAt(ctx.p1.parsed.y),
+          backgroundColor: (ctx) => colorAt(ctx.p1.parsed.y) + (overlay ? "40" : "26"),
+        },
+        borderWidth: overlay ? 2.5 : 2,
         pointRadius: 0,
         tension: 0.35,
         fill: true,
@@ -154,8 +168,17 @@ export function createRealtimeLocChart(canvas, { maxPoints = 60 } = {}) {
       animation: false, // 1秒ごとに更新するのでアニメーションは切る
       plugins: { legend: { display: false }, tooltip: { enabled: false } },
       scales: {
-        y: { min: 0, max: 100, ticks: { stepSize: 25 }, grid: { color: cssVar("--c-border") } },
-        x: { grid: { display: false }, ticks: { maxTicksLimit: 6 } },
+        y: {
+          min: 0, max: 100,
+          ticks: { stepSize: overlay ? 50 : 25, color: tickColor },
+          grid: { color: gridColor },
+          border: { display: !overlay },
+        },
+        x: {
+          display: !overlay,
+          grid: { display: false },
+          ticks: { maxTicksLimit: 6 },
+        },
       },
     },
   });

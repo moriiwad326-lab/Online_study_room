@@ -10,17 +10,24 @@
 
 import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
-import { gaugeHtml, updateGauge, createRealtimeLocChart } from "../charts.js";
+import { createRealtimeLocChart } from "../charts.js";
 import { LocClient, LOC_CONFIG, LOC_STATUS, statusLabel } from "../locClient.js";
 import * as store from "../store.js";
 import { renderAdd } from "./materialAdd.js";
 
 export const meta = { title: "記録する" };
 
-/* LoC が低い状態が続いたときの自動一時停止 */
+/* LoC が低い状態が続いたときの自動一時停止（継続時間を 0 に戻して止める） */
 const LOW_LOC = 15;              // これを下回ると「集中していない」とみなす
 const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一時停止する
-const RESUME_LOC = 30;           // 一時停止後、これ以上に戻ったら再開する
+const ZERO_LIMIT_SEC = 60;       // LoC が 0（席を離れているなど）のままこれだけ続いたら一時停止する
+const RESUME_LOC = 30;           // 一時停止後、これより上に戻ったら 0 から数え直す
+
+/* 自動一時停止の理由ごとの案内 */
+const AUTO_PAUSE_MESSAGE = {
+  zero: `LoCが0の状態が${ZERO_LIMIT_SEC / 60}分続いたため、計測を一時停止しています。`,
+  low: `LoCが${LOW_LOC}未満の状態が${LOW_LIMIT_SEC / 60}分続いたため、計測を一時停止しています。`,
+};
 
 export async function render(ctx) {
   // add なら教材の追加、教材IDが付いていれば計測画面、なければ一覧画面
@@ -203,55 +210,41 @@ function renderMeasure(ctx) {
         <div data-intro-error style="margin-top:12px"></div>
       </section>
 
-      <!-- 計測中 -->
+      <!-- 計測中：カメラ映像の上に継続時間・LoC・推移を重ねる -->
       <section class="card u-hidden" data-view="measure">
-        <div class="u-spread" style="margin-bottom:12px">
-          <h2 class="card__title" style="margin:0">計測中</h2>
-          <span class="status" data-status>待機中</span>
-        </div>
+        <h2 class="card__title">計測中</h2>
 
-        <div class="measure">
-          <!-- 左：カメラプレビュー -->
-          <div>
-            <div class="camera-box" data-camera>
-              <video playsinline muted autoplay data-video></video>
-              <div class="camera-box__off u-hidden" data-camera-off>プレビュー非表示中</div>
+        <div class="stage" data-camera>
+          <video playsinline muted autoplay data-video></video>
+          <div class="stage__off u-hidden" data-camera-off>プレビュー非表示中</div>
+
+          <div class="stage__top">
+            <div>
+              <div class="stage__label">継続時間</div>
+              <div class="stage__timer tabular" data-timer>00:00:00</div>
+              <div class="stage__sub tabular">合計 <span data-total>00:00:00</span></div>
             </div>
-            <button class="btn btn--ghost btn--sm btn--wide" type="button" data-act="toggle-preview" style="margin-top:8px">
-              ${icon("eyeOff", 16)}<span>プレビューを隠す</span>
-            </button>
+            <span class="status" data-status>待機中</span>
           </div>
 
-          <!-- 右：タイマーと LoC -->
-          <div>
-            <div class="u-small u-muted">継続時間</div>
-            <div class="measure__timer tabular" data-timer>00:00:00</div>
-            <div class="u-small u-weak tabular">合計 <span data-total>00:00:00</span></div>
-
-            <div class="measure__loc" style="margin-top:14px">
-              ${gaugeHtml(0, 84, 8)}
-              <div>
-                <div class="u-small u-muted">現在のLoC</div>
-                <div class="measure__loc-num loc-color is-loc-mid" data-loc-num>--</div>
-                <div class="u-small u-weak u-hidden" data-loc-warmup></div>
-              </div>
+          <div class="stage__bottom">
+            <div class="stage__chart"><canvas data-loc-chart></canvas></div>
+            <div class="stage__loc">
+              <div class="stage__label">現在のLoC</div>
+              <div class="stage__loc-num loc-color is-loc-mid tabular" data-loc-num>--</div>
+              <div class="stage__sub u-hidden" data-loc-warmup></div>
             </div>
           </div>
         </div>
 
-        <div class="chart-box" style="margin-top:16px">
-          <canvas data-loc-chart></canvas>
-        </div>
-        <div class="u-small u-weak u-center">直近の LoC 推移</div>
-
-        <div class="u-row" style="margin-top:14px;flex-wrap:wrap">
+        <div class="u-row" style="margin-top:12px;flex-wrap:wrap">
           <button class="btn btn--ghost" type="button" data-act="pause">${icon("pause", 18)}一時停止</button>
           <button class="btn btn--danger" type="button" data-act="finish">${icon("stop", 18)}終了して記録</button>
+          <button class="btn btn--ghost btn--sm" type="button" data-act="toggle-preview" style="margin-left:auto">
+            ${icon("eyeOff", 16)}<span>プレビューを隠す</span>
+          </button>
         </div>
-        <div class="notice notice--warn u-hidden" data-auto-paused style="margin-top:12px">
-          LoCが${LOW_LOC}未満の状態が${LOW_LIMIT_SEC / 60}分続いたため、計測を一時停止しています。<br>
-          LoCが${RESUME_LOC}以上に戻ると自動で再開します。
-        </div>
+        <div class="notice notice--warn u-hidden" data-auto-paused style="margin-top:12px"></div>
         <div data-measure-error style="margin-top:12px"></div>
       </section>
     </div>
@@ -262,9 +255,10 @@ function renderMeasure(ctx) {
     elapsedSec: 0,      // 継続時間。一時停止中は増えず、自動一時停止でリセットされる
     totalSec: 0,        // 記録する学習時間。一時停止中は増えない
     paused: false,      // 手動の一時停止（終了確認中も含む）
-    autoPaused: false,  // LoC が低い状態が続いたことによる一時停止
+    autoPaused: false,  // LoC が低い／0 の状態が続いたことによる一時停止
     lastLoc: null,      // 直近に受け取った LoC
     lowSec: 0,          // LoC が LOW_LOC 未満のまま経過した秒数
+    zeroSec: 0,         // LoC が 0 のまま経過した秒数
     running: false,
     locSamples: [],     // 受け取った LoC をすべて残し、終了時の平均に使う
     stream: null,       // カメラの MediaStream
@@ -278,7 +272,6 @@ function renderMeasure(ctx) {
   const introView = q('[data-view="intro"]');
   const measureView = q('[data-view="measure"]');
   const video = q("[data-video]");
-  const gauge = measureView.querySelector("[data-gauge]");
   const locNum = q("[data-loc-num]");
   const timerEl = q("[data-timer]");
   const statusEl = q("[data-status]");
@@ -335,7 +328,7 @@ function renderMeasure(ctx) {
     state.running = true;
 
     // 3) リアルタイムグラフを用意する（直近5分ぶん＝1秒×300点）
-    state.chart = createRealtimeLocChart(q("[data-loc-chart]"), { maxPoints: 300 });
+    state.chart = createRealtimeLocChart(q("[data-loc-chart]"), { maxPoints: 300, overlay: true });
 
     // 4) LoC の取得を開始する（モック／本番は locClient.js の LOC_CONFIG.mode で決まる）
     state.client = new LocClient({
@@ -346,13 +339,12 @@ function renderMeasure(ctx) {
         warmupEl.classList.add("u-hidden");
 
         // 自動一時停止中も LoC は受け取り続け、戻ったら再開する
-        if (state.autoPaused && v >= RESUME_LOC) setAutoPaused(false);
+        if (state.autoPaused && v > RESUME_LOC) setAutoPaused(false);
         // 一時停止中の LoC は学習中のものではないので平均には入れない
         if (!state.autoPaused) state.locSamples.push(v);
 
-        updateGauge(gauge, v);
         locNum.textContent = v;
-        locNum.className = `measure__loc-num loc-color ${locLevelClass(v)}`;
+        locNum.className = `stage__loc-num loc-color tabular ${locLevelClass(v)}`;
         state.chart.push(v, formatClock(state.totalSec));
       },
       onStatus: (status, detail) => updateStatus(status, detail),
@@ -369,10 +361,16 @@ function renderMeasure(ctx) {
     state.timer = setInterval(() => {
       if (state.paused || state.autoPaused) return;
 
-      // LoC が低いまま一定時間たったら、継続時間をリセットして一時停止する
-      state.lowSec = state.lastLoc !== null && state.lastLoc < LOW_LOC ? state.lowSec + 1 : 0;
+      // LoC が 0 または低いまま一定時間たったら、継続時間をリセットして一時停止する
+      const loc = state.lastLoc;
+      state.zeroSec = loc === 0 ? state.zeroSec + 1 : 0;
+      state.lowSec = loc !== null && loc < LOW_LOC ? state.lowSec + 1 : 0;
+      if (state.zeroSec >= ZERO_LIMIT_SEC) {
+        setAutoPaused(true, "zero");
+        return;
+      }
       if (state.lowSec >= LOW_LIMIT_SEC) {
-        setAutoPaused(true);
+        setAutoPaused(true, "low");
         return;
       }
 
@@ -382,11 +380,16 @@ function renderMeasure(ctx) {
     }, 1000);
   });
 
-  /** LoC による自動一時停止の切り替え */
-  function setAutoPaused(on) {
+  /** LoC による自動一時停止の切り替え（reason: "zero" | "low"） */
+  function setAutoPaused(on, reason) {
     state.autoPaused = on;
     state.lowSec = 0;
-    if (on) state.elapsedSec = 0;
+    state.zeroSec = 0;
+    if (on) {
+      state.elapsedSec = 0;
+      autoPausedEl.innerHTML = `${AUTO_PAUSE_MESSAGE[reason]}<br>
+        LoCが${RESUME_LOC}より上に戻ると、継続時間を0から数え直します。`;
+    }
     autoPausedEl.classList.toggle("u-hidden", !on);
     renderTimers();
   }
