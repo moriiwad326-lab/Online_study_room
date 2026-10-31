@@ -2,14 +2,22 @@
  * store.js : アプリのデータを一手に引き受ける場所
  *
  *  - data/mock.json を読み込む（サーバーの代わり）
- *  - ユーザーの操作で増えるデータ（自分の学習記録・いいね）は localStorage に保存する
- *  - 画面側は store の関数だけを呼び、localStorage を直接触らない
+ *  - ログイン中のユーザー（プロフィール込み）と、そのユーザーの教材・カテゴリを API から受け取って持つ
+ *  - ユーザーの操作で増えるデータ（自分の学習記録・いいね）は localStorage にユーザーごとに保存する
+ *  - 画面側は store の関数だけを呼び、localStorage や API を直接触らない
  */
 
 import { toDateKey, uid, average } from "./utils.js";
+import { api } from "./api.js";
 
-/** localStorage のキー。データ構造を変えたらバージョンを上げる。 */
-const STORAGE_KEY = "onsta.v1";
+/** localStorage のキーの頭。実際のキーは "onsta.v1.u<ユーザーID>"。データ構造を変えたらバージョンを上げる。 */
+const STORAGE_PREFIX = "onsta.v1";
+
+/** プロフィールでアイコン色を選ばなかったときの色 */
+export const DEFAULT_AVATAR_COLOR = "#5b5bd6";
+
+/** 週の目標を設定していないときに使う値（分） */
+const DEFAULT_WEEKLY_GOAL_MIN = 1800;
 
 /** localStorage に保存する側の初期値 */
 const emptyLocal = {
@@ -23,14 +31,30 @@ let mock = null;
 /** localStorage の中身 */
 let local = { ...emptyLocal };
 
+/** ログイン中のユーザー { id, loginId, profileCompleted, profile }。未ログインなら null */
+let currentUser = null;
+/** 今のユーザーの localStorage キー（未ログインなら null で、保存しない） */
+let storageKey = null;
+/** 認証 API に届いたか（python -m http.server だけで配信していると false） */
+let authAvailable = true;
+
+/** 自分のカテゴリ（教科）と教材。サーバーの値をそのまま持つ */
+let myCategories = [];
+let myMaterials = [];
+
+/** 消した教材・見つからない教材を指す記録に使う表示 */
+const UNKNOWN_COLOR = "#9aa0b5";
+
 /* ============ localStorage の読み書き ============ */
 
 function loadLocal() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) return { ...emptyLocal, createdAt: new Date().toISOString() };
     const parsed = JSON.parse(raw);
-    return { ...emptyLocal, ...parsed };
+    // 以前は初回にモックのサンプル記録を入れていた。存在しない教材を指すので取り除く
+    const records = (parsed.records || []).filter((r) => r.source !== "seed");
+    return { ...emptyLocal, ...parsed, records };
   } catch (err) {
     // 壊れたデータが入っていても起動できるようにする
     console.warn("[store] localStorage の読み込みに失敗したので初期化します", err);
@@ -39,8 +63,9 @@ function loadLocal() {
 }
 
 function saveLocal() {
+  if (!storageKey) return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
+    localStorage.setItem(storageKey, JSON.stringify(local));
   } catch (err) {
     console.warn("[store] localStorage への保存に失敗しました", err);
   }
@@ -49,31 +74,30 @@ function saveLocal() {
 /* ============ 初期化 ============ */
 
 /**
- * mock.json を読み込んでアプリを使える状態にする。
+ * mock.json を読み込み、ログイン中ならそのユーザーのデータを開く。
  * file:// で開くと fetch が失敗するので、必ず http サーバー越しに開くこと。
  */
 export async function init() {
   const res = await fetch("data/mock.json", { cache: "no-store" });
   if (!res.ok) throw new Error(`mock.json の読み込みに失敗しました (${res.status})`);
   mock = await res.json();
-  local = loadLocal();
 
-  // 初回起動時は、モックの学習記録を「自分の記録」として取り込む。
-  // （レポートのグラフが最初から見られるようにするため）
-  if (local.records.length === 0) {
-    local.records = mock.myRecords.map((r) => ({
-      id: r.id,
-      materialId: r.materialId,
-      durationMin: r.durationMin,
-      avgLoc: r.avgLoc,
-      locSeries: r.locSeries || [],
-      memo: r.memo || "",
-      // 「何日前」を実際の日時に変換する（20時ごろに勉強したことにする）
-      createdAt: daysAgoToIso(r.daysAgo),
-      source: "seed",
-    }));
-    saveLocal();
+  let user = null;
+  try {
+    ({ user } = await api("GET", "/api/auth/me"));
+  } catch (err) {
+    // 401 は単に未ログイン。それ以外はサーバーに API が無い（ログイン画面で案内する）
+    authAvailable = err.status === 401;
   }
+  if (user) await setUser(user);
+}
+
+/** ログインしたユーザーに切り替え、そのユーザーの保存データと教材を開く */
+async function setUser(user) {
+  currentUser = user;
+  storageKey = `${STORAGE_PREFIX}.u${user.id}`;
+  local = loadLocal();
+  await reloadMaterials();
 }
 
 /** 「n日前」を ISO 文字列にする */
@@ -89,32 +113,158 @@ function minutesAgoToIso(minutesAgo) {
   return new Date(Date.now() - minutesAgo * 60000).toISOString();
 }
 
+/* ============ ログイン ============ */
+
+export const getUser = () => currentUser;
+export const isAuthAvailable = () => authAvailable;
+
+export async function login(loginId, password) {
+  const { user } = await api("POST", "/api/auth/login", { loginId, password });
+  await setUser(user);
+  return user;
+}
+
+/** 新規登録（成功するとそのままログイン状態になる） */
+export async function register(loginId, password) {
+  const { user } = await api("POST", "/api/auth/register", { loginId, password });
+  await setUser(user);
+  return user;
+}
+
+export async function logout() {
+  try {
+    await api("POST", "/api/auth/logout", {});
+  } finally {
+    currentUser = null;
+    storageKey = null;
+    local = { ...emptyLocal };
+    myCategories = [];
+    myMaterials = [];
+  }
+}
+
+/** プロフィールを保存する（初回設定と編集の両方）。保存後のユーザーを返す */
+export async function saveProfile(profile) {
+  const { user } = await api("PUT", "/api/me/profile", { profile });
+  currentUser = user;
+  return user;
+}
+
+/* ============ 教材・カテゴリ ============ */
+
+async function reloadMaterials() {
+  const data = await api("GET", "/api/materials");
+  myCategories = data.categories;
+  myMaterials = data.materials;
+}
+
+/** カテゴリ（教科）を作る。返り値は { id, name, color } */
+export async function addCategory(name, color) {
+  const { category } = await api("POST", "/api/categories", { name, color });
+  myCategories.push(category);
+  return category;
+}
+
+/**
+ * 教材を追加する。
+ * @param {{title:string, categoryId:number, isbn?:string, image?:string, coverUrl?:string}} input
+ *   image は data URL（独自教材でアップロードした画像）、coverUrl はバーコード検索で見つけた表紙
+ */
+export async function addMaterial(input) {
+  const { material } = await api("POST", "/api/materials", input);
+  myMaterials.push(material);
+  return toMaterial(material);
+}
+
+export async function deleteMaterial(materialId) {
+  await api("DELETE", `/api/materials/${encodeURIComponent(materialId)}`);
+  myMaterials = myMaterials.filter((m) => String(m.id) !== String(materialId));
+}
+
+/** バーコードの番号から書名・表紙を調べる。見つからなければ 404 の ApiError */
+export async function lookupBook(isbn) {
+  const { book } = await api("GET", `/api/books/${encodeURIComponent(isbn)}`);
+  return book;
+}
+
+/** サーバーの教材を画面で使う形（科目名・科目色・画像URLつき）にする */
+function toMaterial(m) {
+  const category = myCategories.find((c) => c.id === m.categoryId);
+  return {
+    id: String(m.id),
+    title: m.title,
+    isbn: m.isbn,
+    subjectId: m.categoryId,
+    subjectName: category?.name ?? "その他",
+    color: category?.color ?? UNKNOWN_COLOR,
+    imageUrl: m.hasImage ? `/api/materials/${m.id}/image?v=${m.imageVersion}` : null,
+  };
+}
+
 /* ============ 参照系 ============ */
 
-export const getMe = () => mock.me;
-export const getSubjects = () => mock.subjects;
-export const getMaterials = () => mock.materials;
+/**
+ * 画面に出す「自分」。プロフィールの未設定項目は空にそろえて返す。
+ * name はニックネーム（未設定ならログインID）、initial はその1文字目。
+ */
+export function getMe() {
+  const p = currentUser?.profile || {};
+  const name = p.nickname || currentUser?.loginId || "ゲスト";
+  return {
+    id: currentUser ? `u${currentUser.id}` : "guest",
+    loginId: currentUser?.loginId || "",
+    name,
+    handle: currentUser ? `@${currentUser.loginId}` : "",
+    initial: Array.from(name)[0] || "?",
+    avatarColor: p.avatarColor || DEFAULT_AVATAR_COLOR,
+    bio: p.bio || "",
+    tags: p.tags || [],
+    gender: p.gender || "",
+    birthYear: p.birthYear ?? null,
+    prefecture: p.prefecture || "",
+    grade: p.grade || "",
+    targetSchool: p.targetSchool || "",
+    examName: p.examName || "",
+    examDate: p.examDate || "",
+    weeklyGoalMinutes: p.weeklyGoalMinutes ?? null,
+  };
+}
+
+/** 保存しているプロフィールそのもの（編集フォームの初期値用） */
+export const getProfile = () => ({ ...(currentUser?.profile || {}) });
+/** 自分のカテゴリ（作った順） */
+export const getCategories = () => [...myCategories];
+/** 自分の教材（追加した順） */
+export const getMaterials = () => myMaterials.map(toMaterial);
 export const getArticles = () =>
   mock.articles.map((a) => ({ ...a, createdAt: daysAgoToIso(a.daysAgo) }));
 export const getFindTargets = () => mock.findTargets;
 export const getBadges = () => ({ notifications: mock.notifications, messages: mock.messages });
 
-/** 教材IDから教材（科目名・科目色つき）を引く */
+/**
+ * 教材IDから教材（科目名・科目色つき）を引く。
+ * 自分の教材を先に探し、なければモックの教材（他ユーザーの投稿用）を探す。
+ */
 export function getMaterial(materialId) {
+  const mine = myMaterials.find((x) => String(x.id) === String(materialId));
+  if (mine) return toMaterial(mine);
+
   const m = mock.materials.find((x) => x.id === materialId);
-  if (!m) return { id: materialId, title: "不明な教材", subjectId: "", subjectName: "その他", color: "#9aa0b5" };
+  if (!m) {
+    return { id: materialId, title: "削除した教材", subjectId: "", subjectName: "その他",
+             color: UNKNOWN_COLOR, imageUrl: null, missing: true };
+  }
   const subject = mock.subjects.find((s) => s.id === m.subjectId);
-  return { ...m, subjectName: subject?.name ?? "その他", color: subject?.color ?? "#9aa0b5" };
+  return { ...m, subjectName: subject?.name ?? "その他", color: subject?.color ?? UNKNOWN_COLOR, imageUrl: null };
 }
 
-/** 科目ごとに教材をまとめた配列を返す（記録するページのグリッド用） */
+/** カテゴリごとに自分の教材をまとめた配列を返す（記録するページのグリッド用） */
 export function getMaterialsBySubject() {
-  return mock.subjects
-    .map((subject) => ({
-      ...subject,
-      materials: mock.materials
-        .filter((m) => m.subjectId === subject.id)
-        .map((m) => ({ ...m, subjectName: subject.name, color: subject.color })),
+  const materials = getMaterials();
+  return myCategories
+    .map((category) => ({
+      ...category,
+      materials: materials.filter((m) => m.subjectId === category.id),
     }))
     .filter((group) => group.materials.length > 0);
 }
@@ -152,12 +302,13 @@ export function getTimelinePosts() {
     };
   });
 
+  const me = getMe();
   const mine = local.records.map((r) => ({
     id: r.id,
-    userId: mock.me.id,
-    userName: mock.me.name,
-    initial: mock.me.initial,
-    avatarColor: mock.me.avatarColor,
+    userId: me.id,
+    userName: me.name,
+    initial: me.initial,
+    avatarColor: me.avatarColor,
     createdAt: r.createdAt,
     material: getMaterial(r.materialId),
     durationMin: r.durationMin,
@@ -214,9 +365,9 @@ export function toggleLike(postId, currentLiked) {
   return next;
 }
 
-/** 保存データを全部消す（README の「初期化したいとき」用） */
+/** 今のユーザーの保存データを全部消す（README の「初期化したいとき」用） */
 export function resetLocal() {
-  localStorage.removeItem(STORAGE_KEY);
+  if (storageKey) localStorage.removeItem(storageKey);
   local = { ...emptyLocal, createdAt: new Date().toISOString() };
 }
 
@@ -347,7 +498,7 @@ export function getWeeklyGoal() {
   const doneMin = local.records
     .filter((r) => labels.includes(toDateKey(r.createdAt)))
     .reduce((sum, r) => sum + r.durationMin, 0);
-  const goalMin = mock.me.weeklyGoalMinutes || 1800;
+  const goalMin = getMe().weeklyGoalMinutes || DEFAULT_WEEKLY_GOAL_MIN;
   return {
     goalMin,
     doneMin,

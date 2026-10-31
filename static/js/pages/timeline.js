@@ -5,7 +5,7 @@
  *  - 終了した学習記録は投稿カードとして並べ、平均LoC とスパークラインを添える
  */
 
-import { el, esc, formatRelative, formatDuration, formatClock, clampLoc, locLevelClass } from "../utils.js";
+import { el, esc, formatRelative, formatDuration, formatClock, clampLoc, locLevelClass, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import { gaugeHtml, updateGauge, drawSparkline } from "../charts.js";
 import * as store from "../store.js";
@@ -128,8 +128,8 @@ function renderPostCard(post) {
       </header>
 
       <div class="post__body">
-        <!-- 教材サムネイル：画像を持たないので科目色のプレースホルダで表す -->
-        <div class="thumb" style="background:${post.material.color}">${esc(post.material.title)}</div>
+        <!-- 教材サムネイル：画像が無ければ科目色のプレースホルダで表す -->
+        ${thumbHtml(post.material)}
         <div class="post__info">
           <div class="post__material">${esc(post.material.title)}</div>
           <div class="u-small u-weak">${esc(post.material.subjectName)}</div>

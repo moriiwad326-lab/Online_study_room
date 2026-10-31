@@ -9,8 +9,11 @@ Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 
 - HTML / CSS / Vanilla JavaScript のみ（React などのフレームワーク・ビルドツールなし）
 - グラフ描画のみ [Chart.js](https://www.chartjs.org/) を CDN から読み込み
+- バーコード読み取りに、ブラウザに BarcodeDetector が無いとき（Windows の Chrome など）だけ
+  [ZXing](https://github.com/zxing-js/browser) を CDN から読み込む（読み取りを始めたときに初めて読み込む）
 - ハッシュベースの SPA（`#/timeline` など）
-- データはモック JSON ＋ `localStorage`
+- ログインは `../main.py`（`../System/`）の API。ユーザーは SQLite に保存
+- それ以外のデータはモック JSON ＋ `localStorage`
 
 ---
 
@@ -19,34 +22,31 @@ Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 カメラ（`getUserMedia`）はセキュアなオリジンでしか使えないため、
 **ファイルを直接開くのではなく `localhost` で動かしてください。**
 
-**学習済みモデルで LoC を出す場合**（推奨）。推論サーバーがこのフロントも配信します。
+**アプリサーバー**（フロントの配信＋ログイン API）を起動します。ログインに必要なので必ず起動してください。
 
 ```powershell
 cd C:\Users\morii\develop\Online_Study_Room
-LoC\.venv\Scripts\python.exe LoC\server.py
+python main.py
 ```
 
-ブラウザで <http://localhost:8000/> を開き、「記録する」→ 教材 → 「LoC計測を開始」。
-最初の LoC が出るまで約60秒かかります（その間は「準備中 n/12」と表示）。
+ブラウザで <http://localhost:8000/> を開き、「新規登録」からアカウントを作ります。
+ユーザー情報は `System/data/onsta.db`（git 管理外）に保存されます。
+
+**学習済みモデルで LoC も出す場合**は、もう1つのターミナルで推論サーバーを
+フロント配信なし（`--no-static`。8000番はアプリサーバーが使うため）で起動します。
+
+```powershell
+cd C:\Users\morii\develop\Online_Study_Room
+LoC\.venv\Scripts\python.exe LoC\server.py --no-static
+```
+
+「記録する」→（最初は「教材を追加」）→ 教材 → 「LoC計測を開始」。最初の LoC が出るまで約60秒かかります（その間は「準備中 n/12」と表示）。
 カメラは学習データと同じく**机の真上〜斜め上から手元を写す**向きにしてください。
+推論サーバーを起動していなければ、接続に失敗して自動でモックの LoC に切り替わります。
 
-**フロントだけ動かす場合**（推論サーバーなし。接続に失敗して自動でモックに切り替わる）
-
-```powershell
-cd C:\Users\morii\develop\Online_Study_Room\static
-python -m http.server 8000
-```
-
-ブラウザで <http://localhost:8000/> を開きます。
-
-> `index.html` をダブルクリックで開くと `data/mock.json` の読み込み（fetch）が
-> ブラウザにブロックされ、エラー画面が出ます。必ず HTTP サーバー越しに開いてください。
-
-Python が無い場合は、Node.js があれば次でも動きます。
-
-```powershell
-npx serve -l 8000
-```
+> `index.html` をダブルクリックで開いたり、`python -m http.server` で配信したりすると
+> ログイン API が無いため、ログイン画面に「サーバーに接続できません」と表示されます。
+> 必ず `python main.py` 越しに開いてください。
 
 停止するときは `Ctrl + C` です。
 
@@ -56,12 +56,17 @@ npx serve -l 8000
 
 | ルート | 画面 | 内容 |
 | --- | --- | --- |
+| `#/login` | ログイン | ログインID＋パスワード。未ログインで他の画面を開くとここへ移動 |
+| `#/signup` | 新規登録 | ログインID（半角英数字と `_ . - @` の4〜64文字。メールアドレスも可）＋パスワード（8文字以上・英字と数字を含む） |
+| `#/setup` | マイページの設定 | 初回ログイン時（プロフィール未保存）だけ表示。ニックネームのみ必須、他は任意 |
 | `#/timeline` | タイムライン | 「いま勉強中」のライブ表示（LoC＋継続時間）、投稿カード（平均LoC＋スパークライン）。タブ：フォロー／目標 |
-| `#/record` | 記録する | 科目ごとの教材カード一覧、右下に新規記録ボタン |
-| `#/record/<教材ID>` | LoC計測 | カメラプレビュー、経過時間、現在のLoC、リアルタイム折れ線、一時停止／再開／終了 |
+| `#/record` | 記録する | カテゴリごとの自分の教材一覧（最初は空で追加の案内）、教材を追加、右下に新規記録ボタン |
+| `#/record/add` | 教材を追加 | バーコード（カメラ読み取り／13桁の手入力 → 書名・表紙を検索）か、独自教材（教材名・画像・カテゴリ）で追加 |
+| `#/record/<教材ID>` | LoC計測 | カメラプレビュー、経過時間、現在のLoC、リアルタイム折れ線、一時停止／再開／終了、教材の削除 |
 | `#/report` | レポート | サマリー、週間の積み上げ棒、教材別の円、日別の平均LoC。タブ：記録／自分 |
 | `#/search` | さがす | 検索バー、ユーザー／教材／大学をさがす、記事一覧 |
-| `#/profile` | プロフィール | 登録教材数、基本情報、自己紹介、タグ、保存データの初期化 |
+| `#/profile` | プロフィール | 登録教材数、基本情報、自己紹介、タグ、保存データの初期化、ログアウト |
+| `#/profile/edit` | プロフィール編集 | 初回設定と同じフォームで、あとから変更する |
 
 スマホ幅（〜400px）では、左サイドバーが画面下部のタブバーに切り替わります。
 
@@ -78,27 +83,82 @@ static/
     components.css        カード、ボタン、ゲージ、フォームなど部品
   js/
     app.js                ハッシュルーティングと共通レイアウトの描画
-    store.js              mock.json の読み込み、localStorage、レポート用の集計
+    api.js                アプリサーバー（ログイン・教材 API）を呼ぶクライアント
+    store.js              mock.json の読み込み、ログイン状態、自分の教材、localStorage、レポート用の集計
+    barcode.js            カメラで書籍のバーコードを読む（BarcodeDetector / ZXing）
     locClient.js          LoC 取得クライアント（モック / WebSocket）
     charts.js             Chart.js のラッパー＋自前のゲージ・スパークライン
     utils.js              DOM・時刻整形・LoC の色分けなどの小道具
     icons.js              アイコン（すべてインラインSVGで自作）
     pages/
       timeline.js  record.js  report.js  search.js  profile.js
+      login.js  signup.js  setup.js  profileForm.js（初回設定と編集で共用）
+      materialAdd.js（教材の追加。record.js から呼ぶ）
   data/
-    mock.json             モックデータ（ユーザー・教材・投稿・学習記録など）
+    mock.json             モックデータ（他ユーザーの投稿とその教材・記事など）
   docs/reference/         デザインの参考資料を置く場所
   README.md
 ```
 
 ### データの持ち方
 
-- `data/mock.json` … 他ユーザーの投稿、教材マスタ、記事など「サーバーから来るはずのもの」
-- `localStorage`（キー `onsta.v1`）… 自分の学習記録といいね
+- `data/mock.json` … 他ユーザーの投稿とその教材、記事など「サーバーから来るはずのもの」
+- アプリサーバー（`System/data/onsta.db`）… アカウント、ログインセッション、プロフィール、自分のカテゴリと教材（画像も）
+- `localStorage`（キー `onsta.v1.u<ユーザーID>`）… 自分の学習記録といいね（ユーザーごと）
 
-初回起動時に `mock.json` のサンプル学習記録が `localStorage` へ取り込まれ、
-レポートのグラフが最初から見られる状態になります。
-消したいときはプロフィール画面の「保存データを初期化」を押してください。
+新しいユーザーは教材も学習記録も空から始まります（以前の版で入れていたサンプル学習記録は読み込み時に取り除きます）。
+学習記録を消したいときはプロフィール画面の「保存データを初期化」を押してください。
+
+---
+
+## アプリ API の仕様
+
+実装は `../System/server.py`（HTTP）、`../System/auth.py`（アカウント）、`../System/materials.py`（教材）、
+`../System/books.py`（書誌検索）。リクエスト・レスポンスとも JSON です。
+
+### ログイン
+
+| メソッド | パス | 内容 |
+| --- | --- | --- |
+| `GET` | `/api/auth/me` | ログイン中のユーザー。未ログインなら 401 |
+| `POST` | `/api/auth/register` | `{loginId, password}` で登録し、そのままログイン |
+| `POST` | `/api/auth/login` | `{loginId, password}` でログイン |
+| `POST` | `/api/auth/logout` | ログアウト |
+| `PUT` | `/api/me/profile` | `{profile}` を保存（初回設定・編集とも）。保存すると `profileCompleted` が true になる |
+
+- ユーザーは `{ id, loginId, profileCompleted, profile }` の形で返る
+- エラーは `{ "error": "画面に出せるメッセージ", "field": "loginId" など | null }`
+- `profile` の項目：`nickname`（必須・20文字）、`avatarColor`、`bio`、`tags`（10個まで）、`grade`、
+  `targetSchool`、`examName`、`examDate`（`YYYY-MM-DD`）、`weeklyGoalMinutes`、`gender`、`birthYear`、`prefecture`
+
+セキュリティまわり：
+
+- パスワードは PBKDF2-HMAC-SHA256（60万回・ソルト付き）でハッシュ化して保存
+- セッションは `HttpOnly; SameSite=Lax` の Cookie（30日）。DB にはトークンの SHA-256 だけを保存
+- 書き込み系は `Content-Type: application/json` 必須（他サイトのフォームから送らせない）
+- 同じログインIDで5回続けて失敗すると15分ログインできない
+- HTTPS で公開するときは `python main.py --secure-cookie` で Cookie に `Secure` を付ける
+
+### 教材
+
+| メソッド | パス | 内容 |
+| --- | --- | --- |
+| `GET` | `/api/materials` | 自分のカテゴリと教材 `{categories, materials}` |
+| `POST` | `/api/categories` | `{name, color}` でカテゴリ（教科）を作る。同じ名前は1つだけ |
+| `POST` | `/api/materials` | `{title, categoryId, isbn?, image?, coverUrl?}` で教材を追加 |
+| `DELETE` | `/api/materials/<id>` | 教材を削除（学習記録は残り「削除した教材」と表示） |
+| `GET` | `/api/materials/<id>/image` | 教材の画像（本人だけ取得できる） |
+| `GET` | `/api/books/<ISBN>` | バーコードの番号から書名・著者・出版社・表紙URLを検索 |
+
+- カテゴリはユーザーが自分で作る（既定の教科はなし）。教材の追加フォームの中から作れる
+- `image` はアップロード画像の data URL。フロントで長辺600pxの JPEG に縮めてから送る（サーバーは2MBまで、JPEG/PNG/WebP/GIF のみ）
+- `coverUrl` は書誌検索で見つけた表紙。サーバーがダウンロードして保存する（取りに行くのは openBD / Google Books の画像ホストだけ）
+- ISBN は ISBN-13 / ISBN-10（ハイフン可）を受け付け、チェックディジットを検査する。日本の書籍の下段バーコード（192…）は弾く
+- 書誌検索は openBD → Google Books の順。Google Books はキーなしだと制限（429）にかかりやすいので、
+  使うときは `python main.py --google-books-key <キー>` か環境変数 `GOOGLE_BOOKS_API_KEY` でキーを渡す
+- openBD は書名は取れても表紙が無い本が多い。そのときは追加画面で画像を選んでもらう
+
+テスト：`python -m pytest System/tests`
 
 ---
 

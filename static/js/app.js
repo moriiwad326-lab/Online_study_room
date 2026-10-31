@@ -7,9 +7,12 @@
  * 各ページは js/pages/*.js にあり、次の形を守っている：
  *   export const meta = { title, tabs? }        … ヘッダーに出す情報
  *   export async function render(ctx)           … { node, destroy? } を返す
+ *
+ * ログインまわりの画面（authRoutes）はサイドバー・ヘッダーなしの全画面で出す。
+ * 未ログインなら #/login へ、プロフィール未設定（初回ログイン）なら #/setup へ寄せる。
  */
 
-import { $, el } from "./utils.js";
+import { $, el, esc } from "./utils.js";
 import { icon } from "./icons.js";
 import * as store from "./store.js";
 
@@ -18,6 +21,9 @@ import * as recordPage from "./pages/record.js";
 import * as reportPage from "./pages/report.js";
 import * as searchPage from "./pages/search.js";
 import * as profilePage from "./pages/profile.js";
+import * as loginPage from "./pages/login.js";
+import * as signupPage from "./pages/signup.js";
+import * as setupPage from "./pages/setup.js";
 
 /** ルート名 → ページモジュールの対応表 */
 const routes = {
@@ -26,6 +32,13 @@ const routes = {
   report: reportPage,
   search: searchPage,
   profile: profilePage,
+};
+
+/** サイドバー・ヘッダーを出さない全画面のページ */
+const authRoutes = {
+  login: loginPage,
+  signup: signupPage,
+  setup: setupPage,
 };
 
 /** サイドバーに並べる項目 */
@@ -75,8 +88,8 @@ function renderSidebar(activeRoute) {
     </div>
 
     <a class="side-profile" href="#/profile">
-      <div class="avatar avatar--sm" style="background:${me.avatarColor}">${me.initial}</div>
-      <div class="side-profile__name">${me.name}</div>
+      <div class="avatar avatar--sm" style="background:${me.avatarColor}">${esc(me.initial)}</div>
+      <div class="side-profile__name">${esc(me.name)}</div>
     </a>
 
     <nav class="nav">
@@ -147,9 +160,21 @@ function renderHeader(page, ctx) {
 
 /* ============ ルーティング ============ */
 
+/**
+ * ログイン状態に合わない画面なら、行くべき画面のハッシュを返す（そのままでよければ null）
+ *  - 未ログイン               → ログイン画面（新規登録画面は可）
+ *  - ログイン済み・初回設定前 → 初回設定画面
+ *  - ログイン済み・設定済み   → ログイン・新規登録・初回設定の画面には行かせない
+ */
+function redirectFor(route) {
+  const user = store.getUser();
+  if (!user) return route === "login" || route === "signup" ? null : "#/login";
+  if (!user.profileCompleted) return route === "setup" ? null : "#/setup";
+  return authRoutes[route] ? "#/timeline" : null;
+}
+
 async function router() {
   const ctx = parseHash();
-  const page = routes[ctx.route] || routes.timeline;
 
   // 前のページのタイマーやカメラを必ず止める
   if (currentDestroy) {
@@ -157,8 +182,24 @@ async function router() {
     currentDestroy = null;
   }
 
-  renderSidebar(ctx.route);
-  renderHeader(page, ctx);
+  const redirect = redirectFor(ctx.route);
+  if (redirect) {
+    // hashchange で router がもう一度呼ばれる
+    navigate(redirect);
+    return;
+  }
+
+  const isAuthPage = Boolean(authRoutes[ctx.route]);
+  const page = authRoutes[ctx.route] || routes[ctx.route] || routes.timeline;
+  document.body.classList.toggle("is-auth", isAuthPage);
+
+  if (isAuthPage) {
+    $("#sidebar").innerHTML = "";
+    $("#header").innerHTML = "";
+  } else {
+    renderSidebar(ctx.route);
+    renderHeader(page, ctx);
+  }
 
   // タブが未指定なら最初のタブを既定値にする
   const tabs = page.meta?.tabs || [];

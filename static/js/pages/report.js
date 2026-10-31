@@ -131,7 +131,7 @@ function renderMeTab(charts) {
   const me = store.getMe();
   const goal = store.getWeeklyGoal();
   const summary = store.getSummary();
-  const rest = daysUntil(me.examDate);
+  const rest = me.examDate ? daysUntil(me.examDate) : null;
   const dailyLoc = store.getDailyAvgLoc(7);
 
   // 直近7日で記録がある日だけを使って、平均LoC を1つの数字にまとめる
@@ -142,17 +142,24 @@ function renderMeTab(charts) {
 
   const node = el(`
     <div>
-      <!-- カウントダウン -->
+      <!-- カウントダウン（試験日を設定していなければ設定への導線） -->
+      ${rest === null ? `
+      <section class="card" style="margin-bottom:14px">
+        <div class="u-spread">
+          <p class="u-muted">試験日を設定すると、ここに残り日数が表示されます</p>
+          <a class="btn btn--ghost btn--sm" href="#/profile/edit">${icon("edit", 16)}設定する</a>
+        </div>
+      </section>` : `
       <section class="countdown" style="margin-bottom:14px">
         <div>
-          <div class="countdown__label">${esc(me.examName)}まで</div>
+          <div class="countdown__label">${esc(me.examName || "試験")}まで</div>
           <div class="u-small" style="opacity:.8">${esc(me.examDate)}</div>
         </div>
         <div class="u-center">
           <div class="countdown__num tabular">${rest}</div>
           <div class="countdown__label">日</div>
         </div>
-      </section>
+      </section>`}
 
       <!-- 今週の目標 -->
       <section class="card">
@@ -205,7 +212,7 @@ function renderMeTab(charts) {
             <div class="avatar" style="background:${me.avatarColor}">${esc(me.initial)}</div>
             <div>
               <div class="u-bold">${esc(me.name)}</div>
-              <div class="u-small u-weak">${esc(me.grade)}／${esc(me.prefecture)}</div>
+              <div class="u-small u-weak">${esc([me.grade, me.prefecture].filter(Boolean).join("／") || me.handle)}</div>
             </div>
           </div>
           <a class="btn btn--ghost btn--sm" href="#/profile">${icon("user", 16)}プロフィール</a>

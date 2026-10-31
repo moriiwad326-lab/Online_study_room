@@ -258,3 +258,10 @@
   .nav__item { justify-content: center; }
   .side-cta .btn { padding: 0; justify-content: center; }
 }
+
+/* ---------------- ログインまわりの全画面ページ ---------------- */
+/* サイドバー・ヘッダーを出さず、.page の幅制限も外す */
+body.is-auth .sidebar,
+body.is-auth .header { display: none; }
+body.is-auth .app-shell { display: block; }
+body.is-auth .page { max-width: none; padding: 0; }

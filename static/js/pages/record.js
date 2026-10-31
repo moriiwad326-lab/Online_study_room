@@ -1,15 +1,19 @@
 /**
- * pages/record.js : 記録する（#/record, #/record/<教材ID>）
+ * pages/record.js : 記録する（#/record, #/record/add, #/record/<教材ID>）
  *
- *  #/record            … 科目ごとの教材カード一覧＋新規記録ボタン
+ *  #/record            … カテゴリごとの教材カード一覧＋教材の追加・新規記録ボタン
+ *  #/record/add        … 教材を追加（バーコード／独自教材。pages/materialAdd.js）
  *  #/record/<教材ID>   … LoC計測モード（カメラ＋リアルタイムLoC）と手動記録
+ *
+ *  教材は最初は1冊もなく、ユーザーが自分で追加する。
  */
 
-import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average } from "../utils.js";
+import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import { gaugeHtml, updateGauge, createRealtimeLocChart } from "../charts.js";
 import { LocClient, LOC_CONFIG, LOC_STATUS, statusLabel } from "../locClient.js";
 import * as store from "../store.js";
+import { renderAdd } from "./materialAdd.js";
 
 export const meta = { title: "記録する" };
 
@@ -19,7 +23,8 @@ const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一�
 const RESUME_LOC = 30;           // 一時停止後、これ以上に戻ったら再開する
 
 export async function render(ctx) {
-  // 教材IDが付いていれば計測画面、なければ一覧画面
+  // add なら教材の追加、教材IDが付いていれば計測画面、なければ一覧画面
+  if (ctx.param === "add") return renderAdd(ctx);
   return ctx.param ? renderMeasure(ctx) : renderList(ctx);
 }
 
@@ -28,8 +33,33 @@ export async function render(ctx) {
    ========================================================= */
 
 function renderList(ctx) {
-  const node = el(`<div></div>`);
   const groups = store.getMaterialsBySubject();
+  const count = store.getMaterials().length;
+
+  const node = el(`
+    <div>
+      <div class="u-spread" style="margin-bottom:14px">
+        <span class="u-small u-weak">${count ? `${count}冊の教材` : ""}</span>
+        <a class="btn btn--ghost btn--sm" href="#/record/add">${icon("plus", 16)}教材を追加</a>
+      </div>
+    </div>
+  `);
+
+  // 教材がまだ無いときは追加の案内だけを出す
+  if (count === 0) {
+    node.appendChild(el(`
+      <section class="card empty-state">
+        <div class="empty-state__icon">${icon("book", 30)}</div>
+        <h2 class="empty-state__title">まだ教材がありません</h2>
+        <p class="u-muted">使っている参考書や問題集を追加して、教材ごとに学習を記録しましょう。</p>
+        <div class="empty-state__actions">
+          <a class="btn" href="#/record/add">${icon("camera", 18)}バーコードで追加</a>
+          <a class="btn btn--ghost" href="#/record/add?tab=custom">${icon("book", 18)}独自教材を追加</a>
+        </div>
+      </section>
+    `));
+    return { node };
+  }
 
   groups.forEach((group) => {
     const section = el(`
@@ -46,7 +76,7 @@ function renderList(ctx) {
     group.materials.forEach((m) => {
       grid.appendChild(el(`
         <a class="material-card" href="#/record/${m.id}">
-          <div class="thumb thumb--sm" style="background:${m.color}">${esc(m.title)}</div>
+          ${thumbHtml(m, "thumb--sm")}
           <div>
             <div class="material-card__title">${esc(m.title)}</div>
             <div class="material-card__meta">${esc(group.name)}</div>
@@ -71,7 +101,7 @@ function renderList(ctx) {
  * カメラが使えない環境でも記録できるようにするための入口でもある。
  */
 async function openManualRecordModal(defaultMaterialId = null) {
-  const materials = store.getMaterials().map((m) => store.getMaterial(m.id));
+  const materials = store.getMaterials();
 
   const bodyHtml = `
     <div class="field">
@@ -124,6 +154,17 @@ async function openManualRecordModal(defaultMaterialId = null) {
 function renderMeasure(ctx) {
   const material = store.getMaterial(ctx.param);
 
+  // 消した教材や他の人の教材の URL を開いたとき
+  if (material.missing || !store.getMaterials().some((m) => m.id === material.id)) {
+    return {
+      node: el(`
+        <div>
+          <a class="u-small u-muted" href="#/record">&larr; 教材一覧にもどる</a>
+          <div class="empty">この教材は見つかりませんでした</div>
+        </div>`),
+    };
+  }
+
   const node = el(`
     <div>
       <a class="u-small u-muted" href="#/record">&larr; 教材一覧にもどる</a>
@@ -131,11 +172,12 @@ function renderMeasure(ctx) {
       <!-- 教材の情報 -->
       <section class="card" style="margin-top:10px">
         <div class="u-row" style="gap:12px">
-          <div class="thumb thumb--sm" style="background:${material.color}">${esc(material.title)}</div>
-          <div>
+          ${thumbHtml(material, "thumb--sm")}
+          <div style="flex:1;min-width:0">
             <div class="u-bold">${esc(material.title)}</div>
-            <div class="u-small u-weak">${esc(material.subjectName)}</div>
+            <div class="u-small u-weak">${esc(material.subjectName)}${material.isbn ? `　ISBN ${esc(material.isbn)}` : ""}</div>
           </div>
+          <button class="btn btn--ghost btn--sm" type="button" data-act="delete-material">削除</button>
         </div>
       </section>
 
@@ -251,6 +293,24 @@ function renderMeasure(ctx) {
 
   /* ---- カメラを使わずに記録 ---- */
   q('[data-act="manual"]').addEventListener("click", () => openManualRecordModal(material.id));
+
+  /* ---- 教材の削除（学習記録は残し、教材名は「削除した教材」になる） ---- */
+  q('[data-act="delete-material"]').addEventListener("click", async () => {
+    const ok = await openModal({
+      title: "この教材を削除しますか？",
+      okLabel: "削除する",
+      bodyHtml: `<p class="u-muted">「${esc(material.title)}」を教材一覧から削除します。
+        これまでの学習記録は残りますが、教材名は「削除した教材」と表示されます。</p>`,
+    });
+    if (!ok) return;
+    try {
+      await store.deleteMaterial(material.id);
+      toast("教材を削除しました");
+      location.hash = "#/record";
+    } catch (err) {
+      toast(err.message);
+    }
+  });
 
   /* ---- 計測開始 ---- */
   startBtn.addEventListener("click", async () => {

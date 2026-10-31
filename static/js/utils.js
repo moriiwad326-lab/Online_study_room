@@ -197,3 +197,17 @@ export function openModal({ title, bodyHtml, okLabel = "OK", cancelLabel = "キ�
     if (onMount) onMount(backdrop, { close });
   });
 }
+
+/**
+ * 教材のサムネイル。画像があれば画像、なければ科目色に教材名を載せたプレースホルダ。
+ * @param {{title:string, color:string, imageUrl?:string|null}} material
+ * @param {string} extraClass  "thumb--sm" など
+ */
+export function thumbHtml(material, extraClass = "") {
+  if (material.imageUrl) {
+    return `<div class="thumb thumb--img ${extraClass}">
+      <img src="${esc(material.imageUrl)}" alt="" loading="lazy" />
+    </div>`;
+  }
+  return `<div class="thumb ${extraClass}" style="background:${esc(material.color)}">${esc(material.title)}</div>`;
+}

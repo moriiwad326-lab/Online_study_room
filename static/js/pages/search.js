@@ -6,7 +6,7 @@
  *  - 記事一覧（モックデータ）
  */
 
-import { el, esc, formatRelative } from "../utils.js";
+import { el, esc, formatRelative, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import * as store from "../store.js";
 
@@ -17,7 +17,7 @@ const findIcons = { user: "user", book: "book", school: "school" };
 
 export async function render() {
   const articles = store.getArticles();
-  const materials = store.getMaterials().map((m) => store.getMaterial(m.id));
+  const materials = store.getMaterials();
 
   const node = el(`
     <div>
@@ -91,7 +91,7 @@ export async function render() {
     resultsList.innerHTML = hits.length
       ? hits.map((m) => `
           <a class="material-card" href="#/record/${m.id}" style="border:none;padding:8px 0">
-            <div class="thumb thumb--sm" style="background:${m.color}">${esc(m.title)}</div>
+            ${thumbHtml(m, "thumb--sm")}
             <div>
               <div class="material-card__title">${esc(m.title)}</div>
               <div class="material-card__meta">${esc(m.subjectName)}</div>
