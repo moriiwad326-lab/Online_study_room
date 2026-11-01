@@ -50,6 +50,30 @@ LoC\.venv\Scripts\python.exe LoC\server.py --no-static
 
 停止するときは `Ctrl + C` です。
 
+### スマホ・タブレットから使う（ngrok）
+
+カメラは HTTPS でないと使えないので、[ngrok](https://ngrok.com/) で 8000 番を HTTPS 公開します
+（初回だけ `ngrok config add-authtoken <トークン>` が必要）。
+
+```powershell
+# ターミナル1：アプリサーバー（HTTPS 越しなので Cookie に Secure を付ける）
+.\.venv\Scripts\python.exe main.py --secure-cookie
+
+# ターミナル2：推論サーバー（LoC を出す場合）
+.\.venv\Scripts\python.exe LoC\server.py --no-static
+
+# ターミナル3：公開
+ngrok http 8000
+```
+
+表示された `https://xxxx.ngrok-free.dev` などの URL を端末のブラウザで開きます
+（無料プランでは最初に ngrok の確認画面が出るので「Visit Site」を押す）。
+
+- 公開するのは 8000 番だけです。LoC は `wss://<そのURL>/loc` に接続し、`main.py` が推論サーバー（`localhost:8765`）へ中継します。
+  中継はログイン中かつ同じオリジンのページからの接続だけ通します
+- ngrok の URL はインターネットから誰でも開けます。使わないときは ngrok を止めてください
+- 推論サーバーが同時に計測できるのは1台だけです（新しく計測を始めた端末に切り替わる）
+
 ---
 
 ## 画面一覧
@@ -170,7 +194,8 @@ static/
 ### 本番（WebSocket）
 
 ```
-接続先: ws://localhost:8765/loc
+接続先: ws://localhost:8765/loc        … localhost で開いたとき（推論サーバーに直接）
+        wss://<開いているホスト>/loc   … それ以外（ngrok など。main.py が推論サーバーへ中継）
 ```
 
 **フロント → サーバー**（カメラフレームを約 5fps で送信）
@@ -213,7 +238,7 @@ static/
 ```js
 export const LOC_CONFIG = {
   mode: "live",   // "mock" … モック / "live" … 推論サーバーに接続
-  url: "ws://localhost:8765/loc",
+  url: defaultLocUrl(),   // ページの URL から決める（上の「接続先」）
   fps: 5,
   ...
 };
@@ -224,7 +249,7 @@ export const LOC_CONFIG = {
 | キー | 既定値 | 意味 |
 | --- | --- | --- |
 | `mode` | `"live"` | `"mock"` / `"live"` の切り替え |
-| `url` | `ws://localhost:8765/loc` | 推論サーバーの接続先 |
+| `url` | ページの URL から自動 | 推論サーバーの接続先（固定したいときは直接書く） |
 | `fps` | `5` | 1秒あたりに送るフレーム数 |
 | `frameWidth` | `640` | 送信する JPEG の横幅（px）。小さいと手の検出が落ちる |
 | `jpegQuality` | `0.8` | JPEG の品質（0〜1） |

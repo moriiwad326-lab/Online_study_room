@@ -5,7 +5,8 @@
  * 中身がモックでも本番の WebSocket でも、使い方は変わらない。
  *
  * ── 本番サーバーとのやりとり（Python 側と合わせる） ───────────────
- *   接続先 : ws://localhost:8765/loc
+ *   接続先 : localhost で開いたとき … ws://localhost:8765/loc（推論サーバーに直接）
+ *            それ以外（ngrok など）  … wss://<開いているホスト>/loc（main.py が推論サーバーへ中継）
  *   送信   : { "type": "frame", "timestamp": <ms>, "image": "<JPEGのBase64>" }   約5fps
  *   受信   : { "type": "loc",   "timestamp": <ms>, "loc": 0〜100 }
  *            { "type": "warmup", "timestamp": <ms>, "remaining": <残り枚数>, "total": <窓の長さ>, "seconds": <残り秒> }
@@ -16,6 +17,20 @@
 import { clampLoc } from "./utils.js";
 
 /**
+ * 推論サーバーの接続先をページの URL から決める。
+ *   localhost で開いたとき … 推論サーバー（8765番）に直接つなぐ。LoC/server.py 単体でフロントを配信しても動く
+ *   それ以外のとき         … ページと同じホストの /loc。アプリサーバー（main.py）が推論サーバーへ中継する。
+ *                            スマホから ngrok の https:// で開いたときは wss:// になる
+ */
+function defaultLocUrl() {
+  const { protocol, hostname, host } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") {
+    return "ws://localhost:8765/loc";
+  }
+  return `${protocol === "https:" ? "wss" : "ws"}://${host}/loc`;
+}
+
+/**
  * ★ モック / 本番の切り替えはこの1行だけ ★
  *   "mock" … カメラ映像は送らず、ランダムウォークで LoC を作る
  *   "live" … WebSocket で推論サーバーに接続し、カメラフレームを送る
@@ -24,7 +39,7 @@ export const LOC_CONFIG = {
   mode: "live",
 
   // --- 本番モードの設定 ---
-  url: "ws://localhost:8765/loc",
+  url: defaultLocUrl(),   // 固定したいときは "ws://localhost:8765/loc" などを直接書く
   fps: 5,                 // 1秒あたり何枚フレームを送るか
   frameWidth: 640,        // 送信するJPEGの横幅（縦は映像の比率に合わせる）。小さいと手の検出が落ちる
   jpegQuality: 0.8,       // JPEG の品質（0〜1）。上げると精度は上がるが通信量も増える

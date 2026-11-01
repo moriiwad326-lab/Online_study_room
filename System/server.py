@@ -15,6 +15,11 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     GET    /api/materials/<id>/image 教材の画像（JSON ではなく画像そのもの）
     GET    /api/books/<isbn>         バーコードの番号から書名・表紙を調べる
 
+    GET    /loc                      WebSocket。LoC 推論サーバー（LoC/server.py）へそのまま中継する。
+                                     ngrok などで外から開いたときに、ポート1つ（このサーバー）だけ
+                                     公開すれば済むようにするため。ログイン中で、同じオリジンの
+                                     ページからの接続だけ通す
+
 ユーザーは {id, loginId, profileCompleted, profile} の形で返す。
 セッションは HttpOnly の Cookie で持つ。書き込み系は Content-Type: application/json を必須にして、
 SameSite=Lax と合わせて他サイトのフォームから勝手に送られないようにしている。
@@ -26,9 +31,12 @@ import functools
 import http.server
 import json
 import re
+import socket
+import threading
+import urllib.parse
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .auth import AuthError, AuthStore
 from .books import BookLookup, normalize_isbn
@@ -38,6 +46,9 @@ SESSION_COOKIE = "onsta_session"
 MAX_BODY_BYTES = 16 * 1024
 # 画像を data URL（base64 で 4/3 倍）で受け取るので、教材の追加だけ大きめに
 MAX_MATERIAL_BODY_BYTES = 3 * 1024 * 1024
+# 推論サーバーへ中継しないヘッダー（Cookie は推論サーバーに渡す必要がない）
+LOC_DROP_HEADERS = {"host", "cookie"}
+CRLF = "\r\n"
 
 
 class AppHandler(http.server.SimpleHTTPRequestHandler):
@@ -46,6 +57,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     materials: MaterialStore
     books: BookLookup
     secure_cookie = False
+    loc_upstream: Optional[Tuple[str, int]] = None  # 推論サーバーの (host, port)。None なら中継しない
 
     # (メソッド, パスの正規表現, メソッド名)。グループは数字なら int にして渡す
     ROUTES = [
@@ -67,6 +79,11 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/"):
             self._dispatch("GET")
+        elif self.path.split("?", 1)[0] == "/loc":
+            try:
+                self._proxy_loc()
+            except AuthError as err:
+                self._send_json(err.status, {"error": err.message, "field": err.field})
         else:
             super().do_GET()
 
@@ -169,6 +186,48 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         self._require_user()
         self._send_json(200, {"book": self.books.lookup(raw_isbn)})
 
+    # ---- LoC 推論の中継（WebSocket） ----
+
+    def _proxy_loc(self) -> None:
+        """ハンドシェイクをそのまま推論サーバーへ送り、以降は両方向のバイト列を流すだけ。"""
+        if self.headers.get("Upgrade", "").lower() != "websocket":
+            raise AuthError(400, "WebSocket で接続してください")
+        if not self._same_origin():
+            raise AuthError(403, "別のサイトからは接続できません")
+        self._require_user()
+        if not self.loc_upstream:
+            raise AuthError(503, "LoC 推論サーバーの中継は無効です")
+
+        try:
+            upstream = socket.create_connection(self.loc_upstream, timeout=5)
+        except OSError:
+            raise AuthError(502, "LoC 推論サーバーに接続できません（LoC/server.py を起動してください）") from None
+        upstream.settimeout(None)
+
+        host, port = self.loc_upstream
+        lines = ["GET /loc HTTP/1.1", f"Host: {host}:{port}"]
+        lines += [f"{name}: {value}" for name, value in self.headers.items()
+                  if name.lower() not in LOC_DROP_HEADERS]
+        self.close_connection = True
+        self.log_message('"%s" 推論サーバーへ中継', self.requestline)
+        with upstream:
+            upstream.sendall((CRLF.join(lines) + CRLF + CRLF).encode("latin-1"))
+            # ブラウザは 101 応答を受け取るまでフレームを送らないので、rfile に読み残しは無い。
+            # ここからは生のソケット同士をつなぐ
+            client = self.connection
+            back = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
+            back.start()
+            _pipe(client, upstream)
+            back.join()
+
+    def _same_origin(self) -> bool:
+        """Origin（接続元ページ）と Host（このサーバー）が同じか。ngrok でも Host は公開名のまま届く。"""
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host")
+        if not origin or not host:
+            return False
+        return urllib.parse.urlsplit(origin).netloc.lower() == host.lower()
+
     # ---- 小道具 ----
 
     def _session_token(self) -> Optional[str]:
@@ -225,18 +284,37 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, format, *args):  # noqa: A002 - 親クラスのシグネチャ
-        if self.path.startswith("/api/"):
+        if self.path.startswith(("/api/", "/loc")):
             super().log_message(format, *args)
+
+
+def _pipe(src: socket.socket, dst: socket.socket) -> None:
+    """src から読んだものを dst に書く。どちらかが閉じたら、相手側の送信も止めて終わる。"""
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
 
 def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
                 materials: MaterialStore, books: BookLookup,
-                secure_cookie: bool = False) -> http.server.ThreadingHTTPServer:
+                secure_cookie: bool = False,
+                loc_upstream: Optional[Tuple[str, int]] = None) -> http.server.ThreadingHTTPServer:
     handler_cls = type("BoundAppHandler", (AppHandler,), {
         "store": store,
         "materials": materials,
         "books": books,
         "secure_cookie": secure_cookie,
+        "loc_upstream": loc_upstream,
     })
     handler = functools.partial(handler_cls, directory=str(static_dir))
     return http.server.ThreadingHTTPServer((host, port), handler)
