@@ -316,6 +316,8 @@
   object-fit: cover;
   transform: scaleX(-1); /* 鏡写しにして自然に見せる */
 }
+/* 外カメラは鏡写しにすると左右が逆に見えるので、そのまま映す */
+.stage video.is-rear { transform: none; }
 .stage__off {
   position: absolute;
   inset: 0;

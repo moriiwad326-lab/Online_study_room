@@ -124,6 +124,19 @@ export class LocClient {
     this.paused = false;
   }
 
+  /**
+   * 推論サーバーにつなぎ直して、最初から推定し直す（カメラを切り替えたときなど）。
+   * サーバーは新しい接続が来ると直近の映像の窓を捨てるので、別のカメラの映像が混ざらない。
+   * 一時停止の状態はそのまま。モックのときは何もしない。
+   */
+  restart() {
+    if (this.mode !== "live") return;
+    const paused = this.paused;
+    this.stop();
+    this.start({ video: this._video });
+    this.paused = paused;
+  }
+
   /** 計測を終了し、後片付けをする */
   stop() {
     clearInterval(this._frameTimer);

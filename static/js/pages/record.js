@@ -23,6 +23,46 @@ const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一�
 const ZERO_LIMIT_SEC = 60;       // LoC が 0（席を離れているなど）のままこれだけ続いたら一時停止する
 const RESUME_LOC = 30;           // 一時停止後、これより上に戻ったら 0 から数え直す
 
+/* 使うカメラ（getUserMedia の facingMode）。最後に選んだほうを覚えておく */
+const FACING_KEY = "onsta.cameraFacing";
+const FACING_LABEL = { user: "内カメラ", environment: "外カメラ" };
+
+function loadFacing() {
+  try {
+    return localStorage.getItem(FACING_KEY) === "environment" ? "environment" : "user";
+  } catch {
+    return "user";
+  }
+}
+
+function saveFacing(facing) {
+  try { localStorage.setItem(FACING_KEY, facing); } catch { /* 保存できなくても計測は続ける */ }
+}
+
+/**
+ * 指定した向きのカメラを開く。ideal 指定なので、外カメラの無い PC などでは使えるカメラが開く。
+ * @returns {Promise<{stream: MediaStream, facing: string}>} facing は実際に開いたカメラの向き
+ *          （ブラウザが向きを教えてくれないときは要求した向き）
+ */
+async function openCamera(facing) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  const actual = stream.getVideoTracks()[0]?.getSettings().facingMode;
+  return { stream, facing: actual === "user" || actual === "environment" ? actual : facing };
+}
+
+/** カメラが2台以上あるか（切替ボタンを出すかどうか）。カメラの許可を得たあとに呼ぶ */
+async function hasMultipleCameras() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "videoinput").length >= 2;
+  } catch {
+    return false;
+  }
+}
+
 /* 自動一時停止の理由ごとの案内 */
 const AUTO_PAUSE_MESSAGE = {
   zero: `LoCが0の状態が${ZERO_LIMIT_SEC / 60}分続いたため、計測を一時停止しています。`,
@@ -203,6 +243,14 @@ function renderMeasure(ctx) {
           <input type="checkbox" data-consent>
           <span>上記の内容を理解し、カメラの使用に同意します</span>
         </label>
+        <div class="field__label">使うカメラ</div>
+        <div class="segmented" role="radiogroup" aria-label="使うカメラ" style="max-width:320px">
+          <button class="segmented__item" type="button" role="radio" data-facing="user">内カメラ</button>
+          <button class="segmented__item" type="button" role="radio" data-facing="environment">外カメラ</button>
+        </div>
+        <p class="u-small u-weak" style="margin:-4px 0 12px">
+          机の手元が写るほうを選んでください。計測中にも切り替えられます（スマホ・タブレットなど、カメラが2台ある端末）。
+        </p>
         <div class="u-row" style="flex-wrap:wrap">
           <button class="btn" type="button" data-act="start" disabled>${icon("camera", 18)}LoC計測を開始</button>
           <button class="btn btn--ghost" type="button" data-act="manual">${icon("clock", 18)}カメラを使わず記録</button>
@@ -240,9 +288,14 @@ function renderMeasure(ctx) {
         <div class="u-row" style="margin-top:12px;flex-wrap:wrap">
           <button class="btn btn--ghost" type="button" data-act="pause">${icon("pause", 18)}一時停止</button>
           <button class="btn btn--danger" type="button" data-act="finish">${icon("stop", 18)}終了して記録</button>
-          <button class="btn btn--ghost btn--sm" type="button" data-act="toggle-preview" style="margin-left:auto">
-            ${icon("eyeOff", 16)}<span>プレビューを隠す</span>
-          </button>
+          <div class="u-row" style="margin-left:auto;gap:8px;flex-wrap:wrap">
+            <button class="btn btn--ghost btn--sm u-hidden" type="button" data-act="switch-camera">
+              ${icon("camera", 16)}<span>外カメラに切替</span>
+            </button>
+            <button class="btn btn--ghost btn--sm" type="button" data-act="toggle-preview">
+              ${icon("eyeOff", 16)}<span>プレビューを隠す</span>
+            </button>
+          </div>
         </div>
         <div class="notice notice--warn u-hidden" data-auto-paused style="margin-top:12px"></div>
         <div data-measure-error style="margin-top:12px"></div>
@@ -262,6 +315,8 @@ function renderMeasure(ctx) {
     running: false,
     locSamples: [],     // 受け取った LoC をすべて残し、終了時の平均に使う
     stream: null,       // カメラの MediaStream
+    facing: loadFacing(), // 使うカメラ（"user" 内カメラ / "environment" 外カメラ）
+    switching: false,   // カメラの切り替え中
     client: null,       // LocClient
     chart: null,        // リアルタイム折れ線
     timer: null,        // 1秒ごとのタイマー
@@ -283,6 +338,32 @@ function renderMeasure(ctx) {
   const consent = q("[data-consent]");
   const startBtn = q('[data-act="start"]');
   consent.addEventListener("change", () => { startBtn.disabled = !consent.checked; });
+
+  /* ---- 使うカメラの選択（開始前） ---- */
+  const facingBtns = node.querySelectorAll("[data-facing]");
+  function renderFacingChoice() {
+    facingBtns.forEach((btn) => {
+      const on = btn.dataset.facing === state.facing;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-checked", String(on));
+    });
+  }
+  facingBtns.forEach((btn) => btn.addEventListener("click", () => {
+    state.facing = btn.dataset.facing;
+    saveFacing(state.facing);
+    renderFacingChoice();
+  }));
+  renderFacingChoice();
+
+  /** カメラの映像を画面に出す。外カメラは鏡写しにしない（内カメラだけ鏡のように見せる） */
+  function showStream(stream, facing) {
+    state.stream = stream;
+    state.facing = facing;
+    video.srcObject = stream;
+    video.classList.toggle("is-rear", facing === "environment");
+    const next = facing === "environment" ? "user" : "environment";
+    switchBtn.querySelector("span").textContent = `${FACING_LABEL[next]}に切替`;
+  }
 
   /* ---- カメラを使わずに記録 ---- */
   q('[data-act="manual"]').addEventListener("click", () => openManualRecordModal(material.id));
@@ -311,11 +392,10 @@ function renderMeasure(ctx) {
 
     // 1) カメラを起動する。失敗したら手動記録にフォールバックする。
     try {
-      state.stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-      video.srcObject = state.stream;
+      const { stream, facing } = await openCamera(state.facing);
+      showStream(stream, facing);
+      // カメラが2台以上ある端末だけ、計測中の切替ボタンを出す
+      hasMultipleCameras().then((many) => switchBtn.classList.toggle("u-hidden", !many));
     } catch (err) {
       showIntroError(err);
       startBtn.disabled = false;
@@ -409,6 +489,47 @@ function renderMeasure(ctx) {
     } else {
       state.client?.resume();
       pauseBtn.innerHTML = `${icon("pause", 18)}一時停止`;
+    }
+  });
+
+  /* ---- カメラの切り替え（計測中） ---- */
+  const switchBtn = q('[data-act="switch-camera"]');
+  switchBtn.addEventListener("click", async () => {
+    if (state.switching || !state.stream) return;
+    state.switching = true;
+    switchBtn.disabled = true;
+
+    const prev = state.facing;
+    const next = prev === "environment" ? "user" : "environment";
+    // 2台同時に開けない端末が多いので、先に今のカメラを閉じる
+    state.stream.getTracks().forEach((track) => track.stop());
+    try {
+      const { stream, facing } = await openCamera(next);
+      if (!state.running) {
+        stream.getTracks().forEach((track) => track.stop()); // 切り替え中に計測が終わった
+        return;
+      }
+      showStream(stream, facing);
+      saveFacing(facing);
+      // 写っている場所が変わるので、推論サーバーの窓を捨てて最初から推定し直す
+      state.lastLoc = null;
+      locNum.textContent = "--";
+      locNum.className = "stage__loc-num loc-color is-loc-mid tabular";
+      state.client?.restart();
+      toast(`${FACING_LABEL[facing]}に切り替えました`);
+    } catch (err) {
+      // 切り替えられなかったら元のカメラに戻す
+      toast(`${FACING_LABEL[next]}を起動できませんでした（${err.name}）`);
+      try {
+        const { stream, facing } = await openCamera(prev);
+        if (state.running) showStream(stream, facing);
+        else stream.getTracks().forEach((track) => track.stop());
+      } catch {
+        toast("カメラを起動できませんでした。計測を終了して記録してください");
+      }
+    } finally {
+      state.switching = false;
+      switchBtn.disabled = false;
     }
   });
 
