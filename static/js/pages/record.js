@@ -23,13 +23,24 @@ const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一�
 const ZERO_LIMIT_SEC = 60;       // LoC が 0（席を離れているなど）のままこれだけ続いたら一時停止する
 const RESUME_LOC = 30;           // 一時停止後、これより上に戻ったら 0 から数え直す
 
-/* 使うカメラ（getUserMedia の facingMode）。最後に選んだほうを覚えておく */
+/*
+ * 使うカメラ。最後に選んだものを覚えておく。
+ *   user        … 内カメラ（facingMode: "user"）
+ *   environment … 外カメラ（facingMode: "environment"。iPhone では広角のメインカメラ）
+ *   ultrawide   … 外カメラの超広角。facingMode では選べないので、enumerateDevices の
+ *                 ラベル（iPhone の Safari では「背面超広角カメラ」/ "Back Ultra Wide Camera"）
+ *                 から探して deviceId で開く
+ */
 const FACING_KEY = "onsta.cameraFacing";
-const FACING_LABEL = { user: "内カメラ", environment: "外カメラ" };
+const FACING_LABEL = { user: "内カメラ", environment: "外カメラ", ultrawide: "超広角カメラ" };
+const FACING_ORDER = ["user", "environment", "ultrawide"];
+const ULTRA_WIDE_RE = /ultra\s*wide|超広角/i;
+const VIDEO_SIZE = { width: { ideal: 1280 }, height: { ideal: 720 } };
 
 function loadFacing() {
   try {
-    return localStorage.getItem(FACING_KEY) === "environment" ? "environment" : "user";
+    const saved = localStorage.getItem(FACING_KEY);
+    return FACING_ORDER.includes(saved) ? saved : "user";
   } catch {
     return "user";
   }
@@ -39,27 +50,57 @@ function saveFacing(facing) {
   try { localStorage.setItem(FACING_KEY, facing); } catch { /* 保存できなくても計測は続ける */ }
 }
 
+const getVideo = (video) => navigator.mediaDevices.getUserMedia({ video, audio: false });
+const stopStream = (stream) => stream.getTracks().forEach((track) => track.stop());
+
+/** 超広角カメラを探す。ラベルはカメラの許可を得るまで空なので、許可前は見つからない */
+async function findUltraWide() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.find((d) => d.kind === "videoinput" && ULTRA_WIDE_RE.test(d.label)) || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 指定した向きのカメラを開く。ideal 指定なので、外カメラの無い PC などでは使えるカメラが開く。
- * @returns {Promise<{stream: MediaStream, facing: string}>} facing は実際に開いたカメラの向き
+ * 指定したカメラを開く。ideal 指定なので、外カメラの無い PC などでは使えるカメラが開く。
+ * 超広角が無い端末で ultrawide を選んだときは、普通の外カメラで開く。
+ * @returns {Promise<{stream: MediaStream, facing: string}>} facing は実際に開いたカメラ
  *          （ブラウザが向きを教えてくれないときは要求した向き）
  */
 async function openCamera(facing) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false,
-  });
-  const actual = stream.getVideoTracks()[0]?.getSettings().facingMode;
-  return { stream, facing: actual === "user" || actual === "environment" ? actual : facing };
+  if (facing === "ultrawide") {
+    // 許可済みならラベルが読めるので直接開く。未許可ならまず外カメラを開いて許可をもらう
+    let ultra = await findUltraWide();
+    if (ultra) return { stream: await getVideo({ deviceId: { exact: ultra.deviceId }, ...VIDEO_SIZE }), facing };
+
+    const stream = await getVideo({ facingMode: { ideal: "environment" }, ...VIDEO_SIZE });
+    ultra = await findUltraWide();
+    if (!ultra) return { stream, facing: actualFacing(stream, "environment") };
+    if (stream.getVideoTracks()[0]?.getSettings().deviceId === ultra.deviceId) return { stream, facing };
+    stopStream(stream); // 2台同時に開けない端末が多いので、先に閉じる
+    return { stream: await getVideo({ deviceId: { exact: ultra.deviceId }, ...VIDEO_SIZE }), facing };
+  }
+
+  const stream = await getVideo({ facingMode: { ideal: facing }, ...VIDEO_SIZE });
+  return { stream, facing: actualFacing(stream, facing) };
 }
 
-/** カメラが2台以上あるか（切替ボタンを出すかどうか）。カメラの許可を得たあとに呼ぶ */
-async function hasMultipleCameras() {
+function actualFacing(stream, requested) {
+  const actual = stream.getVideoTracks()[0]?.getSettings().facingMode;
+  return actual === "user" || actual === "environment" ? actual : requested;
+}
+
+/** この端末で切り替えられるカメラの一覧（計測中の切替ボタン用）。カメラの許可を得たあとに呼ぶ */
+async function availableFacings() {
   try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.filter((d) => d.kind === "videoinput").length >= 2;
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    if (cams.length < 2) return [];
+    const ultra = cams.some((d) => ULTRA_WIDE_RE.test(d.label));
+    return ultra ? FACING_ORDER : ["user", "environment"];
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -244,12 +285,14 @@ function renderMeasure(ctx) {
           <span>上記の内容を理解し、カメラの使用に同意します</span>
         </label>
         <div class="field__label">使うカメラ</div>
-        <div class="segmented" role="radiogroup" aria-label="使うカメラ" style="max-width:320px">
+        <div class="segmented" role="radiogroup" aria-label="使うカメラ" style="max-width:420px">
           <button class="segmented__item" type="button" role="radio" data-facing="user">内カメラ</button>
           <button class="segmented__item" type="button" role="radio" data-facing="environment">外カメラ</button>
+          <button class="segmented__item" type="button" role="radio" data-facing="ultrawide">超広角</button>
         </div>
         <p class="u-small u-weak" style="margin:-4px 0 12px">
-          机の手元が写るほうを選んでください。計測中にも切り替えられます（スマホ・タブレットなど、カメラが2台ある端末）。
+          机の手元が写るものを選んでください。計測中にも切り替えられます（スマホ・タブレットなど、カメラが2台以上ある端末）。
+          超広角は iPhone など背面に超広角カメラがある端末で使えます。無い端末では普通の外カメラになります。
         </p>
         <div class="u-row" style="flex-wrap:wrap">
           <button class="btn" type="button" data-act="start" disabled>${icon("camera", 18)}LoC計測を開始</button>
@@ -315,7 +358,8 @@ function renderMeasure(ctx) {
     running: false,
     locSamples: [],     // 受け取った LoC をすべて残し、終了時の平均に使う
     stream: null,       // カメラの MediaStream
-    facing: loadFacing(), // 使うカメラ（"user" 内カメラ / "environment" 外カメラ）
+    facing: loadFacing(), // 使うカメラ（"user" 内カメラ / "environment" 外カメラ / "ultrawide" 超広角）
+    facings: [],        // 計測中に切り替えられるカメラ（切替ボタンはこの順に回す）
     switching: false,   // カメラの切り替え中
     client: null,       // LocClient
     chart: null,        // リアルタイム折れ線
@@ -355,14 +399,24 @@ function renderMeasure(ctx) {
   }));
   renderFacingChoice();
 
+  /** 切替ボタンで次に開くカメラ */
+  function nextFacing() {
+    const list = state.facings.length ? state.facings : ["user", "environment"];
+    const i = list.indexOf(state.facing);
+    return list[(i + 1) % list.length];
+  }
+
+  function renderSwitchLabel() {
+    switchBtn.querySelector("span").textContent = `${FACING_LABEL[nextFacing()]}に切替`;
+  }
+
   /** カメラの映像を画面に出す。外カメラは鏡写しにしない（内カメラだけ鏡のように見せる） */
   function showStream(stream, facing) {
     state.stream = stream;
     state.facing = facing;
     video.srcObject = stream;
-    video.classList.toggle("is-rear", facing === "environment");
-    const next = facing === "environment" ? "user" : "environment";
-    switchBtn.querySelector("span").textContent = `${FACING_LABEL[next]}に切替`;
+    video.classList.toggle("is-rear", facing !== "user");
+    renderSwitchLabel();
   }
 
   /* ---- カメラを使わずに記録 ---- */
@@ -392,10 +446,18 @@ function renderMeasure(ctx) {
 
     // 1) カメラを起動する。失敗したら手動記録にフォールバックする。
     try {
-      const { stream, facing } = await openCamera(state.facing);
+      const requested = state.facing;
+      const { stream, facing } = await openCamera(requested);
       showStream(stream, facing);
+      if (requested === "ultrawide" && facing !== "ultrawide") {
+        toast("超広角カメラが見つからなかったため、外カメラで計測します");
+      }
       // カメラが2台以上ある端末だけ、計測中の切替ボタンを出す
-      hasMultipleCameras().then((many) => switchBtn.classList.toggle("u-hidden", !many));
+      availableFacings().then((list) => {
+        state.facings = list;
+        switchBtn.classList.toggle("u-hidden", list.length < 2);
+        renderSwitchLabel();
+      });
     } catch (err) {
       showIntroError(err);
       startBtn.disabled = false;
@@ -500,9 +562,9 @@ function renderMeasure(ctx) {
     switchBtn.disabled = true;
 
     const prev = state.facing;
-    const next = prev === "environment" ? "user" : "environment";
+    const next = nextFacing();
     // 2台同時に開けない端末が多いので、先に今のカメラを閉じる
-    state.stream.getTracks().forEach((track) => track.stop());
+    stopStream(state.stream);
     try {
       const { stream, facing } = await openCamera(next);
       if (!state.running) {
