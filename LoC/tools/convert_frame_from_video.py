@@ -1,7 +1,9 @@
 """Extract frames from videos at regular second intervals.
 
 Usage:
-  python tools/convert_image_from_video.py <input_path> [--output OUTPUT_DIR] [--rate SECONDS]
+  python LoC/tools/convert_frame_from_video.py <input_path> [--output OUTPUT_DIR] [--rate SECONDS]
+
+OUTPUT_DIR の既定は LoC/datasets/train（学習・評価が読む場所）。
 
 If <input_path> is a directory, all video files in it will be processed.
 Each video's extracted frames are saved under OUTPUT_DIR/<video_basename>/, with filenames
@@ -14,6 +16,8 @@ import math
 import sys
 from pathlib import Path
 from typing import Iterable, List
+
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[1] / "datasets" / "train"
 
 try:
 	import cv2
@@ -70,7 +74,8 @@ def extract_every_n_seconds(video_path: Path, out_base: Path, rate_s: int = 1, i
 def main(argv: List[str] | None = None) -> int:
 	parser = argparse.ArgumentParser(description="Extract frames from video at N-second intervals.")
 	parser.add_argument("input", help="Input video file or directory containing videos")
-	parser.add_argument("--output", "-o", default="tools/output", help="Output base directory (default: output/)")
+	parser.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT_ROOT),
+	                    help=f"Output base directory (default: {DEFAULT_OUTPUT_ROOT})")
 	parser.add_argument("--rate", "-r", type=int, default=1, help="Sampling rate in seconds (default: 1)")
 	parser.add_argument("--ext", default=".jpg", help="Image extension to write (default: .jpg)")
 	args = parser.parse_args(argv)

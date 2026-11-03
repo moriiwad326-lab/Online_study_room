@@ -1,6 +1,7 @@
 .venv/
 LoC/tools/input/
 LoC/tools/output/
+LoC/datasets/
 LoC/tools/venv/
 
 __pycache__/

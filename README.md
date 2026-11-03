@@ -36,8 +36,11 @@ Online_Study_Room/
 └── LoC/                            # 集中度(LoC)推定モデルの開発一式
     ├── core.py                     # **LoCModel**（①〜⑧を結線したモデル本体）
     ├── dataset.py                  # features.npz + labels.csv → 時系列窓データセット（分割方式・ラベル平滑化）
-    ├── train.py                    # 学習スクリプト（Huber損失 / LoC=-1 のマスク / 動画単位分割）
-    ├── evaluate.py                 # leave-one-video-out 交差検証で汎化性能を測る
+    ├── train.py                    # 学習スクリプト（datasets/train で学習 → datasets/test で評価）
+    ├── evaluate.py                 # チェックポイントを datasets/test で評価（MAE / ACC 等）。--cv で train 内の交差検証
+    ├── metrics.py                  # 評価指標（MAE / RMSE / R² / ACC / ACC±10 / macro-F1 / 混同行列）
+    ├── datasets/                   # (gitignore) 学習・評価データ。train/<動画名>/ と test/<動画名>/ に
+    │                               #   フレーム画像・attributes.jsonl・labels.csv・features.npz を置く
     ├── infer.py                    # 学習済みモデルによるリアルタイム推論（Webカメラ/動画）
     ├── MediaPipe_Hands.sample.py   # MediaPipe Hands によるWebカメラ手検出デモ
     ├── README.md                   # (簡易版) フレーム抽出スクリプトの使い方メモ
@@ -65,9 +68,9 @@ Online_Study_Room/
     │   ├── convert_frame_from_video.py  # 動画 → 秒間隔でのフレーム画像切り出し
     │   ├── convert_LoC_from_frame.py    # フレーム群 → LoCラベルCSV生成（Ollama/qwen3.5使用）
     │   ├── dataset_creation.py          # 上記2つを1コマンドで実行する統合パイプライン
+    │   ├── split_dataset.py             # datasets/train ↔ test の振り分け直し（test の動画は TEST_VIDEOS で固定）
     │   ├── qwen3_5.py                    # Ollama経由でqwen3.5にLoCを判定させるプロンプト＋呼び出し
-    │   ├── input/                        # (gitignore) 元動画の置き場
-    │   └── output/                       # (gitignore) 抽出フレーム & labels.csv の出力先
+    │   └── input/                        # (gitignore) 元動画の置き場
     │
     └── tests/
         ├── test_dataset_creation.py       # dataset_creation のユニットテスト
@@ -250,7 +253,7 @@ class LoCModel(nn.Module):
 
 ```mermaid
 flowchart LR
-    V["学習動画\n(LoC/tools/input/*.mp4, *.mov)"] -->|"convert_frame_from_video.py\n--rate 秒間隔でフレーム抽出"| F["フレーム画像群\noutput/<動画名>/<秒>.jpg"]
+    V["学習動画\n(LoC/tools/input/*.mp4, *.mov)"] -->|"convert_frame_from_video.py\n--rate 秒間隔でフレーム抽出"| F["フレーム画像群\ndatasets/train/<動画名>/<秒>.jpg"]
     F -->|"convert_LoC_from_frame.py\nqwen3.5 へ3コール"| A["attributes.jsonl\n(段階 + 属性10項目の生データ)"]
     A -->|"loc_rubric.compose_loc()\n段階 + 加点 − 減点"| L["labels.csv\n(frame, LoC[0-100])"]
     L -->|"build_features.py\nConvNeXt(768) + Hands(162) を事前計算"| N["features.npz\n(frames, image, hand)"]
@@ -331,13 +334,14 @@ LoC = clamp(段階 + 10 × min(COREの充足率 + BONUS, 1) − 25 × min(NEGATI
 
 ### 各スクリプト
 
-- **`convert_frame_from_video.py`**: 動画（または動画の入ったディレクトリ）を受け取り、`--rate` 秒ごとに1フレームを `output/<動画ファイル名>/<秒数>.jpg` として書き出します（OpenCV使用）。
+- **`convert_frame_from_video.py`**: 動画（または動画の入ったディレクトリ）を受け取り、`--rate` 秒ごとに1フレームを `LoC/datasets/train/<動画ファイル名>/<秒数>.jpg` として書き出します（OpenCV使用。`--output LoC/datasets/test` で test 側に置けます）。
 - **`loc_rubric.py`**: 属性スキーマ（`ATTRIBUTE_SPEC`）、モデル出力の正規化（`normalize_attributes` / 段階の `normalize_level`）、加減点（`compose_adjustment`）とLoCの合成（`compose_loc`）。Ollamaに依存しないので単体でテストできます。`SCHEMA_VERSION` を `attributes.jsonl` に記録しており、属性を足し引きしたらこれを上げます。
 - **`qwen3_5.py`**: Ollama の `qwen3.5:9b`（既定）へ段階コール・進捗コール・状態コールを投げ、段階（`level`）と属性の辞書を返す `evaluate_attributes()` を提供します。`samples > 1` で同じ入力を複数回サンプリングし、**属性ごとに多数決**、段階は中央値を取ります（割れた属性は `not_visible` になるので、自信のない判定が教師に混ざりません）。
 - **`convert_LoC_from_frame.py`**: フレームディレクトリを走査して属性を判定し、`attributes.jsonl` と `labels.csv` を書き出します。`--stride N` でNフレームおきに評価して間を線形補間（コストが 1/N になります）、`--recompose` で再推論なしに `labels.csv` だけ作り直し、`--simulate` でOllamaなしの動作確認ができます。1件ごとに追記するので、中断しても同じコマンドで再開できます。
-- **`compare_gold.py`**: 人手のゴールド集合（`gold/gold.csv`）と各ラベルファイルの一致度（LoC の MAE・不在が0になった割合・学習中が誤って0になった割合・`person_visible` の一致率）を出します。ラベリング方式を変えたら、新旧のラベルをこれで比べます。
+- **`compare_gold.py`**: 人手のゴールド集合（`gold/gold.csv`）と各ラベルファイルの一致度（LoC の MAE・不在が0になった割合・学習中が誤って0になった割合・`person_visible` の一致率）を出します。ラベリング方式を変えたら、新旧のラベルをこれで比べます。既定で `datasets/train/` と `datasets/test/` の両方から動画を探します。
 - **`dataset_creation.py`**: 上記を1コマンドに統合したパイプライン。`--reuse-frames` を付けると抽出済みフレームを再利用するので、ラベルだけ付け直したいときに数時間かかる再抽出を避けられます。
-- **`build_features.py`**: 抽出済みフレームを ConvNeXt-Tiny（768次元）と MediaPipe Hands（162次元）に通し、`output/<動画名>/features.npz` として保存します。ConvNeXtをfreezeして使うため、学習前に1度だけ通せば足ります。`dataset.py` はこの `features.npz` と `labels.csv` を突き合わせて時系列窓を作ります。
+- **`build_features.py`**: 抽出済みフレームを ConvNeXt-Tiny（768次元）と MediaPipe Hands（162次元）に通し、`datasets/{train,test}/<動画名>/features.npz` として保存します（引数なしで train・test の両方を処理）。ConvNeXtをfreezeして使うため、学習前に1度だけ通せば足ります。`dataset.py` はこの `features.npz` と `labels.csv` を突き合わせて時系列窓を作ります。
+- **`split_dataset.py`**: `LoC/datasets/train/` と `LoC/datasets/test/` の動画ディレクトリを、`TEST_VIDEOS` に従って動画単位で移動し直します。test に回す8本は `TEST_VIDEOS` で固定しています（LoC の平均・分散・分布が train とほぼ同じで、行数が約 8:2 になる組み合わせ）。データ作成ツールは新しい動画を既定で train/ に置くので、test に回したい動画は `TEST_VIDEOS` に足してからこれを実行します。
 
 ## セットアップ
 
@@ -365,23 +369,23 @@ pip install -r requirements.txt
 ### 動画からフレームを抽出する
 
 ```bash
-python LoC/tools/convert_frame_from_video.py <動画ファイル or ディレクトリ> --output output --rate 1
+python LoC/tools/convert_frame_from_video.py <動画ファイル or ディレクトリ> --rate 1
 ```
 
 - `--rate`: サンプリング間隔（秒）。既定 `1`。
-- 出力は `output/<動画ファイル名>/<秒数>.jpg`。
+- 出力は `LoC/datasets/train/<動画ファイル名>/<秒数>.jpg`（`--output` で変更可。評価専用の動画は `--output LoC/datasets/test`）。
 
 ### フレーム群から集中度ラベル(labels.csv)を生成する
 
 ```bash
 # Ollama + qwen3.5 が必要。10秒おきに評価し、間は線形補間する
-python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --stride 2
+python LoC/tools/convert_LoC_from_frame.py LoC/datasets/train/<動画ファイル名> --stride 2
 
 # 合成ルールを変えたとき: 再推論せず attributes.jsonl から labels.csv を作り直す
-python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --recompose
+python LoC/tools/convert_LoC_from_frame.py LoC/datasets/train/<動画ファイル名> --recompose
 
 # Ollamaなしで動作確認だけしたい場合
-python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --simulate
+python LoC/tools/convert_LoC_from_frame.py LoC/datasets/train/<動画ファイル名> --simulate
 ```
 
 - `--stride N`: Nフレームおきに評価し、間を線形補間します。集中度は本来なめらかに変化するので、5秒刻みで全フレームを個別に判定するのは冗長です。推論コストが 1/N になります。
@@ -392,27 +396,44 @@ python LoC/tools/convert_LoC_from_frame.py output/<動画ファイル名> --simu
 ### 動画 → フレーム抽出 → ラベリングを一括実行
 
 ```bash
-python LoC/tools/dataset_creation.py <動画ファイル or ディレクトリ> --output output --rate 5 --stride 2
+# 既定の出力先は LoC/datasets/train/<動画名>/
+python LoC/tools/dataset_creation.py <動画ファイル or ディレクトリ> --rate 5 --stride 2
 
-# 抽出済みフレームを再利用して、ラベルだけ付け直す
-python LoC/tools/dataset_creation.py tools/input --output tools/output --rate 5 --stride 2 --reuse-frames
+# 評価専用（test）の動画として作る
+python LoC/tools/dataset_creation.py <動画ファイル> --output LoC/datasets/test --rate 5 --stride 2
+
+# 抽出済みフレームを再利用して、ラベルだけ付け直す（test 側の動画は --output LoC/datasets/test）
+python LoC/tools/dataset_creation.py LoC/tools/input --rate 5 --stride 2 --reuse-frames
 ```
 
 ### フレーム群から学習用の特徴量をキャッシュする
 
 ```bash
-# output/<動画名>/ のフレームを ConvNeXt(768次元) + MediaPipe Hands(162次元) に通し、
+# datasets/train・test の各 <動画名>/ のフレームを ConvNeXt(768次元) + MediaPipe Hands(162次元) に通し、
 # 同じディレクトリへ features.npz を書き出す
-python LoC/tools/build_features.py output --batch-size 16
+python LoC/tools/build_features.py --batch-size 16
+# 片方・1動画だけ処理する場合
+python LoC/tools/build_features.py LoC/datasets/train/<動画名>
 ```
 
 ConvNeXtはfreezeして使うため、ここで1度通しておけば学習中に画像を読み直す必要がありません。手の速度特徴は直前フレームとの差分なので、動画ディレクトリごとに `HandFeatureExtractor.reset()` を挟んで処理します。
 
+### 学習用（train）と評価用（test）に振り分ける
+
+```bash
+python LoC/tools/split_dataset.py            # TEST_VIDEOS の動画を test/ へ、それ以外を train/ へ移動
+python LoC/tools/split_dataset.py --dry-run  # 振り分けの確認だけ
+```
+
+学習・評価のスクリプトは `LoC/datasets/train/` と `LoC/datasets/test/` だけを読みます。test/ は最終評価専用で、学習中のエポック選択（検証）にも使いません。同じ動画が別名で2つあると train と test にまたがってリークするので、重複は事前に片方を消してください。
+
 ### 集中度回帰モデルを学習する
 
 ```bash
-python LoC/train.py output --split video --label-smooth 5 --seq-len 12 --epochs 50
+python LoC/train.py --split video --label-smooth 5 --seq-len 12 --epochs 50
 ```
+
+- 既定で `LoC/datasets/train/` を学習に使い、学習が終わるとベストエポックの重みで `LoC/datasets/test/` を評価して MAE・ACC などを表示します（指標は「モデルを test で評価する」を参照）。置き場所は位置引数と `--test` で変えられ、`--no-test` で test 評価を省略できます。
 
 - `--seq-len`: LSTMに入れる時系列長（直近何フレームを見るか）。
 - `--split`: 学習/検証の分け方。
@@ -420,7 +441,7 @@ python LoC/train.py output --split video --label-smooth 5 --seq-len 12 --epochs 
   - `tail`: 動画ごとに時系列順で末尾 `--val-ratio` を検証に回す（旧挙動）。同一動画が両側に入るためリークがあり、数字は楽観的に出る。学習が回っているかの確認用。
 - `--val-videos`: 検証に回す動画ディレクトリ名をカンマ区切りで明示する（`--split video` のとき）。
 - `--label-smooth`: ラベル系列にかける中央値フィルタの幅（奇数。1で無効、**推奨5**）。qwenのラベルは窓を1フレームずつずらして独立に生成されるため、隣接フレームが入力の95%を共有しているのに45%のフレームでラベルが変わり、分散の約6割が独立ノイズになっています。中央値フィルタは「実際に集中が切れた瞬間」のステップを保ったままスパイクだけを削ります。平滑化後のラベルは整数でなくなりますが、回帰タスクなのでそのまま教師に使えます。
-- `--val-ratio`: 検証に回す割合（既定0.2）。`--split video` では動画単位で切るため目標値として扱われます。どちらの分割でもランダムシャッフルはしません（連続フレームはほぼ同一内容なので、シャッフルするとリークが最大化されます）。
+- `--val-ratio`: train/ の中から検証（ベストエポックの選択）に回す割合（既定0.2）。`--split video` では動画単位で切るため目標値として扱われます。どちらの分割でもランダムシャッフルはしません（連続フレームはほぼ同一内容なので、シャッフルするとリークが最大化されます）。
 - 損失は `SmoothL1Loss`（Huber）。`labels.csv` の `LoC = -1`（qwen3.5が判定不能）の行は教師から除外されます。
 - 毎エポック、**「常に学習データのラベル平均を出力するだけ」の予測器のMAE**（`baseline_MAE`）を併記します。`val_MAE` がこれを下回っていなければ、モデルは入力を使えていないのと同じです。
 - ベストスコアのチェックポイントを `LoC/checkpoints/loc_model.pt` に保存します。
@@ -430,16 +451,36 @@ python LoC/train.py output --split video --label-smooth 5 --seq-len 12 --epochs 
 推論時に「人が60秒写っていなければ LoC = 0」を効かせるための判定器です。`attributes.jsonl` の `person_visible`（`schema_version` 3 以降）を教師にして、`features.npz` の ConvNeXt 特徴にロジスティック回帰を載せます。leave-one-video-out の成績を表示してから全動画で学習し、`LoC/checkpoints/presence.pt` に保存します。このファイルが無いと、推論時の 0 固定は無効になります（起動時にその旨を表示）。
 
 ```bash
-python LoC/presence.py LoC/tools/output
+python LoC/presence.py   # datasets/train で学習し、datasets/test で accuracy・不在の検出率を表示
 ```
 
-### 汎化性能を交差検証で測る
+### モデルを test で評価する
 
 ```bash
-python LoC/evaluate.py output --label-smooth 5 --epochs 20
+python LoC/evaluate.py                              # checkpoints/loc_model.pt を datasets/test で評価
+python LoC/evaluate.py --json LoC/checkpoints/test_metrics.json   # 指標を JSON でも保存
 ```
 
-全動画を1本ずつ検証側へ回して学習し（leave-one-video-out）、`val_MAE` の加重平均を出します。検証に回す動画を1組に固定すると、どの動画が当たったかで数字が大きく動く（1本あたり39〜788サンプルとばらついている）ため、当たり外れを均すために使います。動画14本・20エポックでCPUでも約4分です。
+学習時の `seq_len`・`label_smooth` はチェックポイントから読みます。出す指標は次のとおりです（`LoC/metrics.py`）。
+
+| 指標 | 意味 |
+|---|---|
+| MAE / RMSE | 予測と正解ラベル（0〜100）の平均絶対誤差 / 二乗平均平方根誤差 |
+| R² / Pearson | 正解のばらつきをどれだけ説明できたか / 予測と正解の相関 |
+| ACC（5クラス） | LoC を 0–20 / 20–40 / 40–60 / 60–80 / 80–100 に分けたときの正解率。ラベリングの段階（10/30/50/70/90）をそれぞれ中心に持つ区間なので、「段階を当てられたか」に相当 |
+| ACC±10 | \|予測 − 正解\| ≤ 10 の割合（段階の間隔の半分） |
+| macro-F1・混同行列 | クラスの偏り（60–80 が約4割）に引っ張られない見方 |
+| baseline | 学習ラベルの平均を常に出力するだけの予測器の MAE / ACC。これを下回っていなければ入力を使えていない |
+
+全体の指標に加えて、動画ごとの MAE・ACC も表示します。
+
+### 汎化性能を交差検証で測る（train の中だけ）
+
+```bash
+python LoC/evaluate.py --cv --label-smooth 5 --epochs 20
+```
+
+`datasets/train/` の動画を1本ずつ検証側へ回して学習し（leave-one-video-out）、各 fold の val_MAE・ACC・ACC±10 を出します。test/ は混ぜないので、ハイパーパラメータ選びに使えます。検証に回す動画を1組に固定すると、どの動画が当たったかで数字が大きく動くため、全 fold の加重平均で当たり外れを均します。
 
 ラベルの品質はモデルより先に効きます。現状のラベルは分散の約6割が独立ノイズで、`lag-1` 自己相関は0.37しかありません。この水準では、完璧なモデルでも MAE 0.52 程度が下限になります。ラベリング方式を変える際は、人手で付けたゴールド集合（数百フレーム）との一致を基準に比較してください。
 
@@ -549,7 +590,7 @@ READMEの精度維持のため、調査時点（2026-08-26）で確認できた�
 - **フレーム間隔への依存**: 手の速度特徴が「1フレーム前との差分」であるため、`--rate`（学習時）と `--interval`（推論時）を揃える必要がある。現状は利用者が揃える運用で、間隔で除して正規化する処理は未実装。`features.npz` にも間隔のメタデータは持たせていない。
 - **`requirements.txt`**: `torch` / `transformers` / `ollama` / `pytest` を追記済み。ただし `mediapipe` は Python 3.13以降の配布が無いため、`torch` と同居させるには 3.11 系の仮想環境が必要。
 - **カメラの画角**: 収集済みの動画24本はすべて机の真上〜斜め上から手元を写したもの。顔は入っても部分的で、視線は判定できない。一方 `static/js/pages/record.js` の `getUserMedia` は `facingMode` を指定しておらず、PCの内蔵カメラ＝正面から顔と上半身を写す画角になる。**学習データとアプリで画角が逆向き**なので、現モデルをそのままアプリに繋いでも妥当な値は出ない。画角を揃えるか、両画角を扱えるようモデルを拡張するかの判断が必要。
-- **学習用動画・生成物**: `LoC/tools/input/`, `LoC/tools/output/`, `LoC/.venv/`, `LoC/tools/venv/` は `.gitignore` により追跡対象外（大容量の動画・大量のフレーム画像・仮想環境のため）。
+- **学習用動画・生成物**: `LoC/tools/input/`, `LoC/datasets/`, `LoC/.venv/`, `LoC/tools/venv/` は `.gitignore` により追跡対象外（大容量の動画・大量のフレーム画像・仮想環境のため）。
 
 ## 技術選定メモ
 

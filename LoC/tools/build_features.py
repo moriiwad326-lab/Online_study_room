@@ -1,6 +1,6 @@
 """フレーム画像群から学習用の特徴量（画像768次元 + 手162次元）を事前キャッシュする。
 
-`dataset_creation.py` が作った `output/<動画名>/`（フレーム画像 + labels.csv）を入力に、
+`dataset_creation.py` が作った `datasets/{train,test}/<動画名>/`（フレーム画像 + labels.csv）を入力に、
 同じディレクトリへ `features.npz` を書き出す。ConvNeXt は freeze して使う前提なので、
 毎エポック画像を読み直す必要はなく、ここで1度だけ通しておくことで学習が大幅に速くなる。
 
@@ -13,10 +13,12 @@ features.npz の中身:
 1動画ぶんを連続して**処理し、動画が変わるところで `HandFeatureExtractor.reset()` を呼ぶ。
 
 使い方:
+    # 引数なしで datasets/train と datasets/test 配下の動画ディレクトリをまとめて処理する
+    python LoC/tools/build_features.py --skip-existing
     # 1動画ぶん（labels.csv のあるディレクトリ）
-    python LoC/tools/build_features.py output/<動画名>
-    # 出力ルートを渡すと配下の動画ディレクトリをまとめて処理する
-    python LoC/tools/build_features.py output --batch-size 16
+    python LoC/tools/build_features.py LoC/datasets/train/<動画名>
+    # train/ や test/ を渡すと配下の動画ディレクトリをまとめて処理する
+    python LoC/tools/build_features.py LoC/datasets/train --batch-size 16
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ from MediaPipe_Hands.hand_feature_extractor import FEATURE_DIM as HAND_FEATURE_D
 from MediaPipe_Hands.hand_feature_extractor import HandFeatureExtractor
 
 FEATURES_FILENAME = "features.npz"
+DATASETS_ROOT = PACKAGE_ROOT / "datasets"
+DEFAULT_INPUTS = (DATASETS_ROOT / "train", DATASETS_ROOT / "test")
 
 
 def _list_images_or_empty(directory: Path) -> List[str]:
@@ -164,15 +168,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="フレーム画像から画像768次元 + 手162次元の特徴をキャッシュする"
     )
-    parser.add_argument("input", help="フレームディレクトリ、またはそれらを含む出力ルート")
+    parser.add_argument("inputs", nargs="*", default=[str(p) for p in DEFAULT_INPUTS],
+                        help="フレームディレクトリ、またはそれらを含むルート（複数可）。"
+                             f"既定: {DEFAULT_INPUTS[0]} と {DEFAULT_INPUTS[1]}")
     parser.add_argument("--batch-size", "-b", type=int, default=16, help="ConvNeXt のバッチサイズ")
     parser.add_argument("--skip-existing", action="store_true",
                         help="features.npz が既にあるディレクトリを飛ばす")
     parser.add_argument("--device", default=None, help="cpu / cuda（既定は自動判定）")
     args = parser.parse_args(argv)
 
-    written = run(args.input, batch_size=args.batch_size,
-                  overwrite=not args.skip_existing, device=args.device)
+    written: List[Path] = []
+    for input_path in args.inputs:
+        if not Path(input_path).exists():
+            print(f"存在しないためスキップ: {input_path}")
+            continue
+        if not iter_frame_dirs(Path(input_path).expanduser().resolve()):
+            # features.npz・labels.csv だけ置いてありフレーム画像が無い動画もある
+            print(f"フレーム画像を含む動画ディレクトリが無いためスキップ: {input_path}")
+            continue
+        written += run(input_path, batch_size=args.batch_size,
+                       overwrite=not args.skip_existing, device=args.device)
     print(f"{len(written)} 件の features.npz を書き出しました "
           f"(image_dim={IMAGE_FEATURE_DIM}, hand_dim={HAND_FEATURE_DIM})")
     return 0

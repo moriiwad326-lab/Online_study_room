@@ -7,7 +7,7 @@
     python LoC/tools/try_forward.py
 
     # 2. 実フレーム画像から特徴を作って推論する（ConvNeXt + MediaPipe が必要）
-    python LoC/tools/try_forward.py --frames "LoC/tools/output/202606091834"
+    python LoC/tools/try_forward.py --frames "LoC/datasets/test/202606091834"
 
     # 3. 学習済みチェックポイントを読み込んで推論する
     python LoC/tools/try_forward.py --frames <dir> --checkpoint LoC/checkpoints/loc_model.pt

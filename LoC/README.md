@@ -5,11 +5,11 @@ This project includes a small script to extract images from study videos at regu
 Usage:
 
 ```bash
-python tools/convert_frame_from_video.py <input_path> --output output --rate 1
+python tools/convert_frame_from_video.py <input_path> --rate 1
 ```
 
 - `<input_path>`: path to a single video file (e.g. `input/input_video.mp4`) or a directory containing videos.
-- `--output`: base output directory (default: `output/`). Each video will have a subdirectory named after the video filename (without extension).
+- `--output`: base output directory (default: `datasets/train/`; use `datasets/test/` for evaluation-only videos). Each video will have a subdirectory named after the video filename (without extension).
 - `--rate`: sampling rate in seconds (default: `1`).
 - Images are saved as `<second>.jpg` (e.g. `0.jpg`, `1.jpg`, ...).
 

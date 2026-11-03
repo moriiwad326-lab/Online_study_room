@@ -10,7 +10,10 @@
 - 窓は1つの動画ディレクトリ内で閉じる。動画をまたいだ窓は作らない。
 - 先頭 seq_len-1 フレームは窓が埋まらないので使わない。
 
-学習/検証の分割は2種類を選べる（`split`）。
+データは `datasets/train/` と `datasets/test/` に動画単位で分けて置く（`tools/split_dataset.py`）。
+test/ は最終評価専用で、学習中のチェックポイント選択（検証）は train/ の中をさらに分けて行う。
+
+train/ の中での学習/検証の分割は2種類を選べる（`split`）。
 
 - `"video"`（既定・推奨）: **動画単位**で train / val に振り分ける。同一動画は片側にしか
   入らないので、人物・部屋・服装・カメラ位置が train と val で共有されない。ConvNeXt の
@@ -41,6 +44,13 @@ from torch.utils.data import Dataset
 FEATURES_FILENAME = "features.npz"
 LABELS_FILENAME = "labels.csv"
 INVALID_LOC = -1
+
+# 学習・評価に使うデータの置き場所（動画ごとに `<動画名>/features.npz・labels.csv・attributes.jsonl`）。
+# データ作成ツールは既定で train/ に書き出し、`tools/split_dataset.py` が TEST_VIDEOS を test/ へ移す。
+# train/ は学習（とその中での検証）にだけ使い、test/ は最終評価にだけ使う
+DATASETS_ROOT = Path(__file__).resolve().parent / "datasets"
+DEFAULT_TRAIN_DIR = DATASETS_ROOT / "train"
+DEFAULT_TEST_DIR = DATASETS_ROOT / "test"
 
 
 def load_labels(labels_path: str | Path) -> Dict[int, float]:

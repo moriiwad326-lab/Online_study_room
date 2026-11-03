@@ -1,13 +1,19 @@
 """LoCModel の学習スクリプト。
 
-前提: `tools/dataset_creation.py` でフレームとラベルを作り、`tools/build_features.py`
-で `features.npz` をキャッシュ済みであること。ConvNeXt は freeze して事前キャッシュ
+前提: `tools/dataset_creation.py` でフレームとラベルを `datasets/train/<動画名>/` に作り、
+`tools/build_features.py` で `features.npz` をキャッシュし、`tools/split_dataset.py` で
+test 用の動画を `datasets/test/` に振り分け済みであること。ConvNeXt は freeze して事前キャッシュ
 する方針なので、ここで学習するのは射影MLP + LSTM + 回帰ヘッド（約60万パラメータ）のみ。
 
 損失は MSE ではなく Huber（SmoothL1Loss）。ラベルが VLM の自動生成でノイズを含むため、
 外れ値に引っ張られにくい方が安全という判断（README「出力レンジと損失関数」）。
 
-検証の分割は既定で**動画単位**（`--split video`）。同一動画が train と val の両方に入ると
+学習には `datasets/train/` だけを使う。ベストエポックの選択に使う検証データも train/ の中から
+取る（test/ を選択に使うと test の数字が楽観的になるため）。学習が終わったらベストエポックの
+重みで `datasets/test/` を1度だけ評価し、MAE / ACC などを表示する（`--no-test` で省略）。
+チェックポイントだけを後から評価し直すには `evaluate.py` を使う。
+
+train/ の中の検証の分割は既定で**動画単位**（`--split video`）。同一動画が train と val の両方に入ると
 ConvNeXt 特徴から人物・部屋を手がかりに当てられてしまい、汎化性能を過大評価する。
 旧挙動（動画ごとに末尾を検証に回す）は `--split tail` で、学習が回っているかの確認用。
 
@@ -19,12 +25,14 @@ MAE（baseline_MAE）を併記する。val_MAE がこれを下回っていなけ
 できていないのと同じ。
 
 使い方:
-    python LoC/train.py output --split video --label-smooth 5 --epochs 50
+    python LoC/train.py --split video --label-smooth 5 --epochs 50
+    python LoC/train.py LoC/datasets/train --test LoC/datasets/test   # 置き場所を明示する場合
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -39,7 +47,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from core import build_model
-from dataset import build_datasets
+from dataset import DEFAULT_TEST_DIR, DEFAULT_TRAIN_DIR, LoCSequenceDataset, build_datasets
+from metrics import compute_metrics, format_report, per_video_metrics, predict
 
 DEFAULT_CHECKPOINT = PACKAGE_ROOT / "checkpoints" / "loc_model.pt"
 
@@ -89,7 +98,7 @@ def run_epoch(
 
 
 def train(
-    data_root: str | Path,
+    data_root: str | Path = DEFAULT_TRAIN_DIR,
     seq_len: int = 12,
     epochs: int = 50,
     batch_size: int = 32,
@@ -101,11 +110,13 @@ def train(
     split: str = "video",
     val_videos: Optional[Sequence[str]] = None,
     label_smooth: int = 1,
+    test_root: Optional[str | Path] = None,
     verbose: bool = True,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     """1回の学習を実行し、指標の辞書を返す。
 
     checkpoint_path=None でチェックポイントを保存しない（交差検証から呼ぶとき用）。
+    test_root を渡すと、学習後にベストエポックの重みで test を評価し、結果を "test" に入れる。
     """
     torch_device = torch.device(device) if device else torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -150,6 +161,7 @@ def train(
 
     best_score = float("inf")
     best = {"epoch": 0, "train_mae": float("nan"), "val_mae": float("nan")}
+    best_state = None
 
     for epoch in range(1, epochs + 1):
         train_loss, train_mae = run_epoch(model, train_loader, criterion, torch_device, optimizer)
@@ -168,6 +180,7 @@ def train(
         if score < best_score:
             best_score = score
             best = {"epoch": epoch, "train_mae": train_mae, "val_mae": val_mae}
+            best_state = copy.deepcopy(model.state_dict())
             if checkpoint_path is not None:
                 torch.save(
                     {
@@ -178,11 +191,13 @@ def train(
                         "label_smooth": label_smooth,
                         "epoch": epoch,
                         "score": score,
+                        # evaluate.py が test の baseline_MAE を出すのに使う
+                        "train_mean": train_mean,
                     },
                     checkpoint_path,
                 )
 
-    metrics = {
+    metrics: Dict[str, object] = {
         "best_score": best_score,
         "best_epoch": float(best["epoch"]),
         "train_mae": float(best["train_mae"]),
@@ -197,18 +212,37 @@ def train(
               f"baseline_MAE={baseline_mae:.3f}")
         if checkpoint_path is not None:
             print(f"checkpoint: {checkpoint_path}")
+
+    if test_root is not None:
+        # ベストエポックの重みに戻してから、test を1度だけ評価する
+        if best_state is not None:
+            model.load_state_dict(best_state)
+        test_set = LoCSequenceDataset(test_root, seq_len=seq_len, subset="all",
+                                      label_smooth=label_smooth)
+        result = predict(model, test_set, torch_device)
+        test_metrics = compute_metrics(result["pred"], result["true"], train_mean)
+        metrics["test"] = test_metrics
+        if verbose:
+            print()
+            print(format_report(test_metrics, title=f"test ({Path(test_root)})",
+                                per_video=per_video_metrics(result, train_mean)))
     return metrics
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="LoCModel（集中度回帰）を学習する")
-    parser.add_argument("data", help="features.npz と labels.csv を含むディレクトリ（またはその親）")
+    parser.add_argument("data", nargs="?", default=str(DEFAULT_TRAIN_DIR),
+                        help="学習データ（features.npz と labels.csv を含むディレクトリ、またはその親）。"
+                             f"既定: {DEFAULT_TRAIN_DIR}")
+    parser.add_argument("--test", default=str(DEFAULT_TEST_DIR),
+                        help=f"学習後に評価する test データ。既定: {DEFAULT_TEST_DIR}")
+    parser.add_argument("--no-test", action="store_true", help="学習後の test 評価を省略する")
     parser.add_argument("--seq-len", type=int, default=12, help="LSTM に入れる時系列長")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val-ratio", type=float, default=0.2,
-                        help="検証に回す割合（0で検証なし）")
+                        help="train の中から検証（ベストエポックの選択）に回す割合（0で検証なし）")
     parser.add_argument("--split", choices=("video", "tail"), default="video",
                         help="video: 動画単位で分割（既定・汎化性能を測るならこちら） / "
                              "tail: 動画ごとに末尾を検証に回す（同一動画が両側に入るためリークあり）")
@@ -234,6 +268,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         split=args.split,
         val_videos=[v for v in args.val_videos.split(",") if v] if args.val_videos else None,
         label_smooth=args.label_smooth,
+        test_root=None if args.no_test else args.test,
     )
     return 0
 

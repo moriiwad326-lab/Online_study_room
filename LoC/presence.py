@@ -8,8 +8,12 @@ qwen を呼ばずに在席を判定する手段が要る。そこで qwen の `p
 MediaPipe Hands の検出フラグを使わないのは、真上からの画角では書いている最中の手でも
 約半分を見逃すため（勉強中の窓の24%が「12フレーム手が無い」になる。実測）。
 
+`datasets/train/` で学習し（leave-one-video-out の成績も表示）、学習に使っていない
+`datasets/test/` で accuracy / 不在の検出率 / 在席→不在の誤りを測る。
+
 学習:
-    python LoC/presence.py LoC/tools/output
+    python LoC/presence.py                       # datasets/train で学習、datasets/test で評価
+    python LoC/presence.py LoC/datasets/train --test LoC/datasets/test
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ import torch.nn as nn
 from ConvNeXT.image_feature_extractor import IMAGE_FEATURE_DIM
 
 DEFAULT_PRESENCE_CHECKPOINT = PACKAGE_ROOT / "checkpoints" / "presence.pt"
+DEFAULT_TRAIN_DIR = PACKAGE_ROOT / "datasets" / "train"
+DEFAULT_TEST_DIR = PACKAGE_ROOT / "datasets" / "test"
 
 # tools/loc_rubric.SCHEMA_VERSION のうち person_visible を持つ最初の版
 PRESENCE_SCHEMA_VERSION = 3
@@ -167,7 +173,12 @@ def evaluate(model: PresenceClassifier, features: np.ndarray, targets: np.ndarra
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="qwen の person_visible から在席判定器を学習する")
-    parser.add_argument("roots", nargs="+", help="features.npz と attributes.jsonl を含むディレクトリ（またはその親）")
+    parser.add_argument("roots", nargs="*", default=[str(DEFAULT_TRAIN_DIR)],
+                        help="学習データ（features.npz と attributes.jsonl を含むディレクトリ、またはその親）。"
+                             f"既定: {DEFAULT_TRAIN_DIR}")
+    parser.add_argument("--test", default=str(DEFAULT_TEST_DIR),
+                        help=f"学習後に評価する test データ。既定: {DEFAULT_TEST_DIR}")
+    parser.add_argument("--no-test", action="store_true", help="test 評価を省略する")
     parser.add_argument("--output", default=str(DEFAULT_PRESENCE_CHECKPOINT))
     parser.add_argument("--threshold", type=float, default=0.5)
     args = parser.parse_args(argv)
@@ -206,6 +217,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     torch.save({"model_state_dict": model.state_dict(), "threshold": args.threshold,
                 "videos": [v[0] for v in videos]}, output)
     print(f"{len(videos)} 本・{len(targets)} フレーム（不在 {int((targets == 0).sum())}）で学習 → {output}")
+
+    if not args.no_test:
+        test_videos = load_samples([args.test])
+        if not test_videos:
+            print(f"test に person_visible を持つ動画がありません: {args.test}")
+            return 0
+        print(f"\ntest: {args.test} の {len(test_videos)}本")
+        for name, test_x, test_y in test_videos:
+            m = evaluate(model, test_x, test_y, args.threshold)
+            print(f"  {name}: acc={m['accuracy']:.3f} 不在の検出率={m['absent_recall']:.3f} "
+                  f"在席→不在の誤り={m['present_as_absent']:.3f} (n={m['n']}, 不在={m['n_absent']})")
+        m = evaluate(model, np.concatenate([v[1] for v in test_videos]),
+                     np.concatenate([v[2] for v in test_videos]), args.threshold)
+        print(f"test 全体: acc={m['accuracy']:.3f} 不在の検出率={m['absent_recall']:.3f} "
+              f"在席→不在の誤り={m['present_as_absent']:.3f} (n={m['n']}, 不在={m['n_absent']})")
     return 0
 
 

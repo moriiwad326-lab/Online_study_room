@@ -7,8 +7,13 @@ This script orchestrates the existing tools:
    convert_LoC_from_frame); pass --keep-warmup to label them anyway.
 3. Save the resulting labels CSV next to the extracted frames.
 
+出力先は既定で `LoC/datasets/train/<動画名>/`（学習用）。test に回す動画は
+`--output LoC/datasets/test` で直接置くか、`split_dataset.py` の `TEST_VIDEOS` に足して
+振り分け直す。
+
 Example:
-    python tools/dataset_creation.py input_video.mp4 --output output --rate 5
+    python LoC/tools/dataset_creation.py input_video.mp4 --rate 5
+    python LoC/tools/dataset_creation.py input_video.mp4 --output LoC/datasets/test --rate 5
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ from pathlib import Path
 from typing import List, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+# 学習・評価は LoC/datasets/{train,test}/<動画名>/ を読む。新しい動画は既定で train へ
+DEFAULT_OUTPUT_ROOT = SCRIPT_DIR.parent / "datasets" / "train"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -141,7 +148,8 @@ def run_pipeline(
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Create a frame-based LoC dataset from video input")
     parser.add_argument("input", help="Input video file or directory containing videos")
-    parser.add_argument("--output", "-o", default="output", help="Output root directory")
+    parser.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT_ROOT),
+                        help=f"Output root directory (default: {DEFAULT_OUTPUT_ROOT})")
     parser.add_argument("--rate", "-r", type=int, default=5, help="Sampling interval in seconds (default: 5)")
     parser.add_argument("--stride", "-s", type=int, default=1,
                         help="何フレームおきに属性を判定するか（既定1。間は線形補間）")
