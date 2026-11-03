@@ -26,10 +26,13 @@ export async function render(ctx) {
     node.appendChild(renderGoalTab());
   } else {
     // --- いま勉強中 ---
+    // 誰も勉強していないときはセクションごと出さない
     const liveUsers = store.getLiveUsers();
-    const liveSection = renderLiveSection(liveUsers);
-    node.appendChild(liveSection);
-    timers.push(startLiveTicker(liveSection, liveUsers));
+    if (liveUsers.length > 0) {
+      const liveSection = renderLiveSection(liveUsers);
+      node.appendChild(liveSection);
+      timers.push(startLiveTicker(liveSection, liveUsers));
+    }
 
     // --- 投稿一覧 ---
     const posts = store.getTimelinePosts();
@@ -181,6 +184,11 @@ function renderPostCard(post) {
 function renderGoalTab() {
   const wrap = el(`<div class="section"></div>`);
   const goals = store.getGoalPosts();
+
+  if (goals.length === 0) {
+    wrap.appendChild(el(`<div class="empty">まだ目標の投稿がありません</div>`));
+    return wrap;
+  }
 
   goals.forEach((g) => {
     wrap.appendChild(el(`

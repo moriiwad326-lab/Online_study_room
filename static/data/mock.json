@@ -45,80 +45,11 @@
     { "id": "m13", "subjectId": "info",      "title": "情報I 実践問題集" }
   ],
 
-  "liveUsers": [
-    { "id": "u01", "name": "ハルカ",   "initial": "ハ", "avatarColor": "#e8724c", "materialId": "m08", "elapsedSec": 2760, "loc": 82 },
-    { "id": "u02", "name": "ケイタ",   "initial": "ケ", "avatarColor": "#2d9cdb", "materialId": "m04", "elapsedSec": 1145, "loc": 64 },
-    { "id": "u03", "name": "みなみ",   "initial": "み", "avatarColor": "#27ae60", "materialId": "m06", "elapsedSec": 5320, "loc": 91 },
-    { "id": "u04", "name": "そうた",   "initial": "そ", "avatarColor": "#eb5a8c", "materialId": "m10", "elapsedSec": 430,  "loc": 38 },
-    { "id": "u05", "name": "Rin",      "initial": "R",  "avatarColor": "#8e6fe0", "materialId": "m02", "elapsedSec": 3980, "loc": 71 },
-    { "id": "u06", "name": "たくみ",   "initial": "た", "avatarColor": "#f2994a", "materialId": "m12", "elapsedSec": 760,  "loc": 55 }
-  ],
+  "liveUsers": [],
 
-  "posts": [
-    {
-      "id": "p01", "userId": "u03", "userName": "みなみ", "initial": "み", "avatarColor": "#27ae60",
-      "minutesAgo": 24, "materialId": "m06", "durationMin": 95,
-      "memo": "有機の構造決定がようやく手が止まらなくなってきた。あと2周。",
-      "likes": 12, "comments": 3, "liked": false,
-      "avgLoc": 78,
-      "locSeries": [62, 70, 74, 81, 85, 88, 84, 79, 72, 80, 86, 83, 77, 74, 81]
-    },
-    {
-      "id": "p02", "userId": "u01", "userName": "ハルカ", "initial": "ハ", "avatarColor": "#e8724c",
-      "minutesAgo": 68, "materialId": "m09", "durationMin": 50,
-      "memo": "",
-      "likes": 6, "comments": 0, "liked": true,
-      "avgLoc": 64,
-      "locSeries": [48, 55, 62, 68, 71, 66, 59, 63, 70, 74, 68, 61, 58, 66, 69]
-    },
-    {
-      "id": "p03", "userId": "u05", "userName": "Rin", "initial": "R", "avatarColor": "#8e6fe0",
-      "minutesAgo": 145, "materialId": "m02", "durationMin": 120,
-      "memo": "微積の融合問題。途中で眠くなったのがLoCに出てて笑った。",
-      "likes": 21, "comments": 5, "liked": false,
-      "avgLoc": 59,
-      "locSeries": [72, 78, 75, 68, 60, 52, 41, 35, 38, 47, 55, 63, 69, 72, 66]
-    },
-    {
-      "id": "p04", "userId": "u02", "userName": "ケイタ", "initial": "ケ", "avatarColor": "#2d9cdb",
-      "minutesAgo": 260, "materialId": "m05", "durationMin": 70,
-      "memo": "電磁気の導入だけ。明日ちゃんとやる。",
-      "likes": 4, "comments": 1, "liked": false,
-      "avgLoc": 71,
-      "locSeries": [58, 66, 72, 77, 80, 76, 71, 68, 73, 78, 74, 69, 72, 75, 70]
-    },
-    {
-      "id": "p05", "userId": "u04", "userName": "そうた", "initial": "そ", "avatarColor": "#eb5a8c",
-      "minutesAgo": 400, "materialId": "m10", "durationMin": 35,
-      "memo": "",
-      "likes": 9, "comments": 2, "liked": false,
-      "avgLoc": 45,
-      "locSeries": [38, 42, 50, 47, 39, 33, 41, 52, 55, 48, 40, 44, 51, 46, 43]
-    },
-    {
-      "id": "p06", "userId": "u06", "userName": "たくみ", "initial": "た", "avatarColor": "#f2994a",
-      "minutesAgo": 610, "materialId": "m12", "durationMin": 60,
-      "memo": "気候区分の暗記。集中できた日は記録見るのが楽しい。",
-      "likes": 15, "comments": 4, "liked": false,
-      "avgLoc": 83,
-      "locSeries": [70, 79, 85, 88, 90, 86, 82, 84, 87, 89, 85, 80, 83, 86, 88]
-    }
-  ],
+  "posts": [],
 
-  "goalPosts": [
-    {
-      "id": "g01", "userId": "u05", "userName": "Rin", "initial": "R", "avatarColor": "#8e6fe0",
-      "minutesAgo": 90, "goal": "今週：数学II の微積を1周する", "progress": 62
-    },
-    {
-      "id": "g02", "userId": "u01", "userName": "ハルカ", "initial": "ハ", "avatarColor": "#e8724c",
-      "minutesAgo": 300, "goal": "英単語を毎日100語、平均LoC 70以上をキープ", "progress": 45
-    },
-    {
-      "id": "g03", "userId": "u03", "userName": "みなみ", "initial": "み", "avatarColor": "#27ae60",
-      "minutesAgo": 720, "goal": "化学重要問題集をA問題だけ完走", "progress": 88
-    }
-  ],
+  "goalPosts": [],
 
   "myRecords": [
     { "id": "r01", "daysAgo": 0, "materialId": "m01", "durationMin": 65, "avgLoc": 74, "memo": "場合の数", "locSeries": [60, 68, 75, 80, 78, 72, 70, 76, 79, 74] },
