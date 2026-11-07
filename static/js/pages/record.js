@@ -207,7 +207,7 @@ async function openManualRecordModal(defaultMaterialId = null) {
     </div>
     <div class="field">
       <label class="field__label" for="mr-memo">メモ（任意）</label>
-      <textarea class="textarea" id="mr-memo" placeholder="今日やったこと、気づいたことなど"></textarea>
+      <textarea class="textarea" id="mr-memo" maxlength="200" placeholder="今日やったこと、気づいたことなど"></textarea>
     </div>
     <p class="u-small u-weak">この記録には LoC は付きません（カメラ計測なしのため）。</p>
   `;
@@ -230,7 +230,12 @@ async function openManualRecordModal(defaultMaterialId = null) {
   });
 
   if (!ok || !values || !values.durationMin) return;
-  store.addRecord({ ...values, source: "manual" });
+  try {
+    await store.addRecord({ ...values, source: "manual" });
+  } catch (err) {
+    toast(`記録を保存できませんでした：${err.message}`);
+    return;
+  }
   toast("記録を保存しました");
   location.hash = "#/timeline";
 }
@@ -625,7 +630,7 @@ function renderMeasure(ctx) {
         </div>
         <div class="field">
           <label class="field__label" for="fin-memo">メモ（任意）</label>
-          <textarea class="textarea" id="fin-memo" placeholder="今日やったこと、気づいたことなど"></textarea>
+          <textarea class="textarea" id="fin-memo" maxlength="200" placeholder="今日やったこと、気づいたことなど"></textarea>
         </div>`,
       onMount(root) {
         root.querySelector('[data-act="ok"]').addEventListener("click", () => {
@@ -641,14 +646,20 @@ function renderMeasure(ctx) {
       return;
     }
 
-    store.addRecord({
-      materialId: material.id,
-      durationMin,
-      memo: state.memo || "",
-      // グラフが重くならないよう、保存する LoC は最大60点に間引く
-      locSeries: thin(state.locSamples, 60),
-      source: "camera",
-    });
+    try {
+      await store.addRecord({
+        materialId: material.id,
+        durationMin,
+        memo: state.memo || "",
+        // グラフが重くならないよう、保存する LoC は最大60点に間引く
+        locSeries: thin(state.locSamples, 60),
+        source: "camera",
+      });
+    } catch (err) {
+      // 計測の内容は捨てずに一時停止のままにして、もう一度「終了」で保存し直せるようにする
+      toast(`記録を保存できませんでした（もう一度「終了」を押してください）：${err.message}`);
+      return;
+    }
 
     cleanup();
     toast("記録を保存しました");

@@ -10,6 +10,8 @@
  *
  * ログインまわりの画面（authRoutes）はサイドバー・ヘッダーなしの全画面で出す。
  * 未ログインなら #/login へ、プロフィール未設定（初回ログイン）なら #/setup へ寄せる。
+ *
+ * ヘッダーの通知・メッセージの未読数は、ページを移るたびと BADGE_POLL_MS ごとにサーバーへ聞く。
  */
 
 import { $, el, esc } from "./utils.js";
@@ -23,6 +25,13 @@ import * as searchPage from "./pages/search.js";
 import * as profilePage from "./pages/profile.js";
 import * as loginPage from "./pages/login.js";
 import * as setupPage from "./pages/setup.js";
+import * as notificationsPage from "./pages/notifications.js";
+import * as messagesPage from "./pages/messages.js";
+import * as userPage from "./pages/user.js";
+import * as adminPage from "./pages/admin.js";
+
+/** 未読数を聞き直す間隔（ms） */
+const BADGE_POLL_MS = 30000;
 
 /** ルート名 → ページモジュールの対応表 */
 const routes = {
@@ -31,6 +40,10 @@ const routes = {
   report: reportPage,
   search: searchPage,
   profile: profilePage,
+  notifications: notificationsPage,
+  messages: messagesPage,
+  users: userPage,
+  admin: adminPage,
 };
 
 /** サイドバー・ヘッダーを出さない全画面のページ */
@@ -47,6 +60,9 @@ const navItems = [
   { route: "search",   label: "さがす",       icon: "search" },
   { route: "profile",  label: "もっと見る",   icon: "more" },
 ];
+
+/** 管理者にだけ出す項目 */
+const adminNavItem = { route: "admin", label: "管理", icon: "lock" };
 
 /** 今表示しているページの後片付け関数（タイマー解除など） */
 let currentDestroy = null;
@@ -79,6 +95,7 @@ export function navigate(hash) {
 
 function renderSidebar(activeRoute) {
   const me = store.getMe();
+  const items = store.isAdmin() ? [...navItems, adminNavItem] : navItems;
 
   const html = `
     <div class="logo">
@@ -92,7 +109,7 @@ function renderSidebar(activeRoute) {
     </a>
 
     <nav class="nav">
-      ${navItems.map((item) => `
+      ${items.map((item) => `
         <a class="nav__item ${item.route === activeRoute ? "is-active" : ""}"
            href="#/${item.route}">
           ${icon(item.icon, 21)}
@@ -115,7 +132,6 @@ function renderSidebar(activeRoute) {
  * タブをクリックすると ?tab=... を書き換えるだけで、再描画はルーターに任せる。
  */
 function renderHeader(page, ctx) {
-  const badges = store.getBadges();
   const tabs = page.meta?.tabs || [];
   const activeTab = ctx.tab || tabs[0]?.key;
 
@@ -124,12 +140,10 @@ function renderHeader(page, ctx) {
       <h1 class="header__title">${page.meta?.title || "Onsta"}</h1>
       <div class="header__actions">
         <button class="icon-btn" type="button" aria-label="通知" data-act="notifications">
-          ${icon("bell", 21)}
-          ${badges.notifications ? `<span class="icon-btn__badge">${badges.notifications}</span>` : ""}
+          ${icon("bell", 21)}<span data-badge="notifications"></span>
         </button>
         <button class="icon-btn" type="button" aria-label="メッセージ" data-act="messages">
-          ${icon("message", 21)}
-          ${badges.messages ? `<span class="icon-btn__badge">${badges.messages}</span>` : ""}
+          ${icon("message", 21)}<span data-badge="messages"></span>
         </button>
       </div>
     </div>
@@ -144,17 +158,24 @@ function renderHeader(page, ctx) {
 
   const header = $("#header");
   header.innerHTML = html;
+  renderBadges();
 
-  // 通知・メッセージは今回はモックなので、押されたことだけ知らせる。
   // ヘッダー要素は使い回すので、addEventListener ではなく onclick で毎回上書きする
   // （そうしないとページを移るたびにハンドラが重なってしまう）。
   header.onclick = (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
-    if (!act) return;
-    import("./utils.js").then(({ toast }) =>
-      toast(act === "notifications" ? "通知はまだありません（モック）" : "メッセージ機能は準備中です")
-    );
+    if (act) navigate(`#/${act}`);
   };
+}
+
+/** ヘッダーの未読バッジだけを描き直す（store が BADGES_EVENT を投げたとき） */
+function renderBadges() {
+  const badges = store.getBadges();
+  document.querySelectorAll("#header [data-badge]").forEach((slot) => {
+    const count = badges[slot.dataset.badge] || 0;
+    slot.className = count ? "icon-btn__badge" : "";
+    slot.textContent = count ? (count > 99 ? "99+" : String(count)) : "";
+  });
 }
 
 /* ============ ルーティング ============ */
@@ -198,6 +219,7 @@ async function router() {
   } else {
     renderSidebar(ctx.route);
     renderHeader(page, ctx);
+    store.refreshBadges();
   }
 
   // タブが未指定なら最初のタブを既定値にする
@@ -243,6 +265,11 @@ async function boot() {
   }
 
   window.addEventListener("hashchange", router);
+  window.addEventListener(store.BADGES_EVENT, renderBadges);
+  // 開いていないタブでは聞きに行かない
+  setInterval(() => {
+    if (document.visibilityState === "visible" && store.getUser()) store.refreshBadges();
+  }, BADGE_POLL_MS);
 
   // ハッシュが無いときはタイムラインへ
   if (!location.hash) location.hash = "#/timeline";

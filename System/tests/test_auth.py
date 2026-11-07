@@ -464,6 +464,34 @@ def test_admin_cli(tmp_path, capsys):
     assert AuthStore(tmp_path / "t.db").list_invitations() == []
 
 
+def test_admin_cli_grants_admin(tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    store = AuthStore(tmp_path / "t.db")
+    store.invite("taro@example.com")
+    user = store.login_with_google("sub-taro", "taro@example.com")
+    assert admin.main(["--db", db, "grant-admin", str(user["id"])]) == 0
+    assert store.get_user(user["id"])["isAdmin"] is True
+    admin.main(["--db", db, "list"])
+    assert "[管理者]" in capsys.readouterr().out
+    assert admin.main(["--db", db, "revoke-admin", str(user["id"])]) == 0
+    assert store.get_user(user["id"])["isAdmin"] is False
+    assert admin.main(["--db", db, "grant-admin", "999"]) == 1
+
+
+def test_admin_column_added_to_existing_db(tmp_path):
+    """管理者フラグが無かった頃の DB でも起動でき、全員が管理者でない状態から始まる。"""
+    import sqlite3
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, google_sub TEXT UNIQUE,"
+                 " email TEXT, legacy_login_id TEXT, profile TEXT NOT NULL DEFAULT '{}',"
+                 " profile_completed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+    conn.execute("INSERT INTO users (google_sub, email, created_at) VALUES ('s', 'a@example.com', 'x')")
+    conn.commit()
+    conn.close()
+    assert AuthStore(db).get_user(1)["isAdmin"] is False
+
+
 def test_admin_cli_lists_unlinked_accounts(old_db, capsys):
     path, _ = old_db
     assert admin.main(["--db", str(path), "list"]) == 0
@@ -649,7 +677,8 @@ def test_login_flow_with_invited_account(app):
     me = browser.call("GET", "/api/auth/me").json["user"]
     assert me["email"] == "taro@example.com"
     assert me["profileCompleted"] is False
-    assert set(me) == {"id", "email", "profileCompleted", "profile"}
+    assert set(me) == {"id", "email", "profileCompleted", "isAdmin", "profile"}
+    assert me["isAdmin"] is False
 
     res = browser.call("PUT", "/api/me/profile", {"profile": {"nickname": "たろう"}})
     assert res.status == 200 and res.json["user"]["profile"]["nickname"] == "たろう"
@@ -666,7 +695,8 @@ def test_uninvited_account_gets_no_session(app):
     browser = Browser(app)
     res = browser.login()
     assert res.status == 303 and res.location == "/#/login?error=not_invited"
-    assert browser.cookie_names() == set()
+    # セッションは出さない（招待申請に使う、確認済みメールアドレスの引換券の Cookie だけ）
+    assert browser.cookie_names() == {"onsta_apply"}
     assert browser.call("GET", "/api/auth/me").status == 401
     assert app.store.list_users() == []
 
@@ -822,7 +852,7 @@ def test_password_endpoints_are_gone(app, method, path):
 
 
 def test_no_invitation_api_exists(app):
-    """招待は CLI からだけ。Web からは自分を招待できない。"""
+    """招待を直接作る Web API は無い（Web からは、申請を管理者が承認したときだけ作られる）。"""
     app.store.invite("taro@example.com")
     browser = Browser(app)
     browser.login()

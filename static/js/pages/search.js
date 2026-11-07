@@ -1,19 +1,23 @@
 /**
  * pages/search.js : さがす（#/search）
  *
- *  - 検索バー（入力すると教材と記事を絞り込む）
- *  - 「ユーザー／教材／大学をさがす」カード
+ *  - 検索バー（入力すると、ニックネームでユーザーを探し、自分の教材と記事を絞り込む）
+ *  - 「ユーザー／教材／大学をさがす」カード（ユーザーは検索バーへ。教材・大学はモック）
  *  - 記事一覧（モックデータ）
  */
 
 import { el, esc, formatRelative, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import * as store from "../store.js";
+import { personRowHtml, bindFollowButtons } from "./people.js";
 
 export const meta = { title: "さがす" };
 
 /** 「さがす」カードのキーとアイコンの対応 */
 const findIcons = { user: "user", book: "book", school: "school" };
+
+/** 入力が止まってからユーザーを検索するまでの時間（ms） */
+const USER_SEARCH_DELAY_MS = 300;
 
 export async function render() {
   const articles = store.getArticles();
@@ -24,7 +28,7 @@ export async function render() {
       <!-- 検索バー -->
       <div class="search-bar">
         ${icon("search", 18)}
-        <input type="search" placeholder="教材・記事・キーワードで検索" data-search aria-label="検索">
+        <input type="search" placeholder="ユーザー（ニックネーム）・教材・記事で検索" data-search aria-label="検索">
       </div>
 
       <!-- 何をさがすか -->
@@ -40,6 +44,11 @@ export async function render() {
       </section>
 
       <!-- 検索結果（入力があるときだけ表示） -->
+      <section class="section u-hidden" data-user-results>
+        <div class="section__head"><h2 class="section__title">ユーザー</h2></div>
+        <div class="card" data-user-list></div>
+      </section>
+
       <section class="section u-hidden" data-results>
         <div class="section__head"><h2 class="section__title">教材の検索結果</h2></div>
         <div class="card" data-results-list></div>
@@ -77,14 +86,41 @@ export async function render() {
   const resultsSection = node.querySelector("[data-results]");
   const resultsList = node.querySelector("[data-results-list]");
 
-  node.querySelector("[data-search]").addEventListener("input", (e) => {
+  /* ---- ユーザーの検索（サーバーに聞く。打つたびに聞かないよう少し待つ） ---- */
+  const userSection = node.querySelector("[data-user-results]");
+  const userList = node.querySelector("[data-user-list]");
+  bindFollowButtons(userList);
+  let userTimer = null;
+  let latestQuery = "";
+
+  const searchUsers = async (keyword) => {
+    latestQuery = keyword;
+    try {
+      const users = await store.searchUsers(keyword);
+      if (keyword !== latestQuery) return;  // 古い問い合わせの結果は捨てる
+      userList.innerHTML = users.length
+        ? users.map(personRowHtml).join("")
+        : `<div class="empty">該当するユーザーがいません</div>`;
+    } catch (err) {
+      if (keyword === latestQuery) userList.innerHTML = `<div class="notice notice--error">${esc(err.message)}</div>`;
+    }
+  };
+
+  const input = node.querySelector("[data-search]");
+  input.addEventListener("input", (e) => {
     const keyword = e.target.value.trim();
     drawArticles(keyword);
 
+    clearTimeout(userTimer);
     if (!keyword) {
+      latestQuery = "";
+      userSection.classList.add("u-hidden");
       resultsSection.classList.add("u-hidden");
       return;
     }
+    userSection.classList.remove("u-hidden");
+    userList.innerHTML = `<div class="empty">さがしています…</div>`;
+    userTimer = setTimeout(() => searchUsers(keyword), USER_SEARCH_DELAY_MS);
     resultsSection.classList.remove("u-hidden");
 
     const hits = materials.filter((m) => match(m.title + m.subjectName, keyword));
@@ -100,14 +136,19 @@ export async function render() {
       : `<div class="empty">該当する教材がありません</div>`;
   });
 
-  /* ---- 「さがす」カード（今回はモック） ---- */
+  /* ---- 「さがす」カード（ユーザーは検索バーへ。ほかはモック） ---- */
   node.querySelectorAll("[data-find]").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (btn.dataset.find === "user") {
+        input.focus();
+        import("../utils.js").then(({ toast }) => toast("ニックネームを入力してください"));
+        return;
+      }
       import("../utils.js").then(({ toast }) => toast("この検索はモックです"));
     });
   });
 
-  return { node };
+  return { node, destroy() { clearTimeout(userTimer); } };
 }
 
 /** 大文字小文字を無視した部分一致 */

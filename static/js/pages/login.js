@@ -6,9 +6,13 @@
  *  ボタンはサーバーの /api/auth/google/start へ移動するだけで、以降はサーバーと Google がやりとりする。
  *  戻ってきたあとの行き先（タイムライン or 初回設定）は app.js のガードに任せる。
  *  初回設定の画面も同じ見た目の枠（authShell）を使う。
+ *
+ *  招待されていないアカウントで戻ってくると、サーバーが「Google で確認したメールアドレスの引換券」を
+ *  Cookie で渡してくる（30分有効）。それがあれば、そのアドレスで参加を申請するフォームを出す。
+ *  管理者が承認したら、もう一度 Google でログインすれば登録される。
  */
 
-import { el, esc } from "../utils.js";
+import { el, esc, toast } from "../utils.js";
 import * as store from "../store.js";
 
 export const meta = { title: "ログイン" };
@@ -19,7 +23,7 @@ const ERROR_MESSAGES = {
   expired: "ログインの有効期限が切れました。もう一度お試しください。",
   unverified: "メールアドレスが確認されていない Google アカウントではログインできません。",
   not_invited: "この Google アカウントは登録を許可されていません。Onsta は招待制です。"
-    + "招待を受けている場合や、以前のログインIDからの移行は、管理者に連絡してください。",
+    + "下のフォームから参加を申請できます。以前のログインIDからの移行は、管理者に連絡してください。",
   failed: "Google でのログインに失敗しました。しばらくしてからもう一度お試しください。",
 };
 
@@ -71,11 +75,69 @@ export async function render({ query }) {
 
       <a class="btn-google" href="/api/auth/google/start">${GOOGLE_LOGO}Google でログイン</a>
 
+      <div data-apply></div>
+
       <p class="auth__switch">
         Onsta は招待制です。招待された Google アカウントは、はじめてのログインで登録されます。
       </p>
     </div>
   `);
 
+  renderApplication(node.querySelector("[data-apply]"));
   return { node };
+}
+
+/** 招待されていない Google アカウントで戻ってきたときの、参加申請のフォーム */
+async function renderApplication(box) {
+  let application = null;
+  try {
+    application = await store.getApplication();
+  } catch (err) {
+    console.warn("[login] 申請の状態を取れませんでした", err);
+  }
+  if (!application) return;
+
+  if (application.pending) {
+    box.innerHTML = appliedHtml(application.email);
+    return;
+  }
+
+  box.innerHTML = `
+    <form class="apply-form" data-form>
+      <h2 class="apply-form__title">参加を申請する</h2>
+      <p class="u-small u-muted">
+        Google アカウント <b>${esc(application.email)}</b> で申請します。
+        管理者が承認すると、このアカウントでログインできるようになります。
+      </p>
+      <div class="field">
+        <label class="field__label" for="apply-message">ひとこと（任意）</label>
+        <textarea class="textarea" id="apply-message" maxlength="200"
+                  placeholder="例）〇〇さんの紹介です／〇〇高校の3年生です"></textarea>
+      </div>
+      <div data-error></div>
+      <button class="btn btn--wide" type="submit">申請する</button>
+    </form>`;
+
+  const form = box.querySelector("[data-form]");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await store.submitApplication(form.querySelector("#apply-message").value.trim());
+      box.innerHTML = appliedHtml(application.email);
+      toast("申請しました");
+    } catch (err) {
+      form.querySelector("[data-error]").innerHTML =
+        `<div class="notice notice--error" role="alert">${esc(err.message)}</div>`;
+      button.disabled = false;
+    }
+  });
+}
+
+function appliedHtml(email) {
+  return `
+    <div class="notice notice--warn apply-done">
+      <b>${esc(email)}</b> で参加を申請済みです。管理者が承認したら、もう一度「Google でログイン」を押してください。
+    </div>`;
 }

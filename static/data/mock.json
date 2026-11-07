@@ -81,8 +81,5 @@
     { "id": "f01", "key": "user",   "label": "ユーザーをさがす",   "desc": "同じ志望校の仲間を見つける" },
     { "id": "f02", "key": "book",   "label": "教材をさがす",       "desc": "みんなが使っている参考書" },
     { "id": "f03", "key": "school", "label": "大学をさがす",       "desc": "志望校の情報をチェック" }
-  ],
-
-  "notifications": 3,
-  "messages": 1
+  ]
 }

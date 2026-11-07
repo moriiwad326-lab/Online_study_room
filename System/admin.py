@@ -1,12 +1,15 @@
 """招待（新規登録を許すメールアドレス）を管理する CLI。
 
-Web の API からは招待を操作できない。サーバーの DB に触れる管理者だけがこれで操作する。
+招待はここで直接作るほか、Web の招待申請を管理者が承認しても作られる。
+Web で承認できる管理者を決めるのはここだけ（grant-admin / revoke-admin）。
 
 使い方:
     python -m System.admin invite someone@gmail.com          # 新しい人を招待する
     python -m System.admin invite someone@gmail.com --user 2 # 旧アカウント（ID 2）に結び付ける
     python -m System.admin uninvite someone@gmail.com        # 未使用の招待を取り消す
     python -m System.admin list                              # 招待とユーザーの一覧
+    python -m System.admin grant-admin 1                     # ユーザー 1 を管理者にする（Web で招待申請を承認できる）
+    python -m System.admin revoke-admin 1                    # 管理者から外す
 """
 
 from __future__ import annotations
@@ -36,7 +39,8 @@ def _print_list(store: AuthStore) -> None:
     for user in users:
         name = user["nickname"] or "（ニックネーム未設定）"
         if user["linked"]:
-            print(f"  {user['id']}: {user['email']} / {name}")
+            admin = " [管理者]" if user["isAdmin"] else ""
+            print(f"  {user['id']}: {user['email']} / {name}{admin}")
         else:
             print(f"  {user['id']}: [未結び付け・ログイン不可] 旧ログインID={user['legacyLoginId']} / {name}")
 
@@ -54,6 +58,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     uninvite.add_argument("email")
 
     commands.add_parser("list", help="招待とユーザーの一覧を出す")
+
+    grant = commands.add_parser("grant-admin", help="ユーザーを管理者にする（Web で招待申請を承認できる）")
+    grant.add_argument("user_id", type=int)
+    revoke = commands.add_parser("revoke-admin", help="ユーザーを管理者から外す")
+    revoke.add_argument("user_id", type=int)
     args = parser.parse_args(argv)
 
     # 出力をファイルにリダイレクトしても、絵文字入りのニックネームなどで止まらないように
@@ -71,6 +80,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"{args.email} の招待はありません")
                 return 1
             print(f"{args.email} の招待を取り消しました")
+        elif args.command in ("grant-admin", "revoke-admin"):
+            granted = args.command == "grant-admin"
+            store.set_admin(args.user_id, granted)
+            print(f"ユーザー {args.user_id} を管理者{'にしました' if granted else 'から外しました'}")
         else:
             _print_list(store)
     except AuthError as err:

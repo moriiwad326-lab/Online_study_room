@@ -826,3 +826,174 @@
   gap: 8px;
   margin-top: 16px;
 }
+
+/* =========================================================
+   フォロー・通知・メッセージ・招待申請
+   ========================================================= */
+
+/* 投稿カードの名前部分（ユーザーページへのリンク） */
+.post__head--link { color: inherit; text-decoration: none; }
+.post__head--link:hover .post__name { text-decoration: underline; }
+
+/* 小さなラベル（「フォローされています」など） */
+.chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-sub);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+/* ユーザー一覧の1行 */
+.person-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--c-border);
+}
+.person-row:last-child { border-bottom: none; }
+.person-row__main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.person-row__text { flex: 1; min-width: 0; }
+.person-row__name { font-weight: 700; overflow-wrap: anywhere; }
+a.person-row__main:hover .person-row__name { text-decoration: underline; }
+.card.person-row { border-bottom: none; padding: 12px 16px; }
+
+/* フォロー数 */
+.follow-counts { gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; }
+.follow-counts a { color: var(--c-text-sub); text-decoration: none; }
+.follow-counts a:hover { text-decoration: underline; }
+.follow-counts b { color: var(--c-text); font-size: 15px; }
+
+/* メッセージの一覧 */
+.conv-row__last {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.count-badge {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--c-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* メッセージのやりとり */
+.thread { display: flex; flex-direction: column; gap: 12px; }
+.thread__list { display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
+.bubble-row { display: flex; flex-direction: column; align-items: flex-start; }
+.bubble-row--me { align-items: flex-end; }
+.bubble {
+  max-width: min(80%, 460px);
+  padding: 9px 13px;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.bubble--me {
+  border-radius: 16px 16px 4px 16px;
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+.bubble__time { margin-top: 2px; font-size: 11px; color: var(--c-text-weak); }
+.thread__form {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px 0;
+  background: var(--c-bg);
+}
+.thread__form .textarea { flex: 1; min-height: 44px; resize: vertical; }
+
+/* 通知 */
+.notif {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  margin: 0 -8px;
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--c-border);
+  color: inherit;
+  text-decoration: none;
+  line-height: 1.6;
+}
+.notif:last-child { border-bottom: none; }
+.notif:hover { background: var(--c-surface-2); }
+.notif.is-unread { background: var(--c-primary-light); }
+.notif__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.notif__icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-primary-light);
+  color: var(--c-primary-dark);
+}
+
+/* 招待申請 */
+.request__email { overflow-wrap: anywhere; }
+.request__message {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.request__actions { gap: 8px; margin-top: 12px; }
+.status-chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.status-chip--pending  { background: #fff6e5; color: #9a6a00; }
+.status-chip--approved { background: #e6f7ef; color: #1d7a52; }
+.status-chip--rejected { background: var(--c-surface-2); color: var(--c-text-sub); border: 1px solid var(--c-border); }
+
+/* ログイン画面の参加申請 */
+.apply-form {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--c-border);
+  text-align: left;
+}
+.apply-form__title { font-size: 15px; font-weight: 800; margin-bottom: 6px; }
+.apply-form .field { margin-top: 12px; }
+.apply-form .notice--error { margin-bottom: 10px; }
+.apply-done { margin-top: 16px; text-align: left; line-height: 1.7; }

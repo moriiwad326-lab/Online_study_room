@@ -3,7 +3,8 @@
 - 本人確認は Google に任せ（`google_oauth.py`）、ここには Google アカウントの ID（sub）だけを持つ。
   パスワードは一切扱わない
 - 新規登録は招待制。invitations にあるメールアドレスの Google アカウントだけが登録でき、
-  招待は登録に使うと消える。招待の操作は `admin.py`（サーバー上の CLI）からだけ行う
+  招待は登録に使うと消える。招待は `admin.py`（サーバー上の CLI）で直接作るか、
+  招待申請（`invites.py`）を管理者（is_admin）が Web で承認すると作られる
 - セッションはランダムなトークンを Cookie で渡し、DB には SHA-256 したものだけを保存する
   （DB が漏れてもそのままセッションに使えないように）
 - プロフィール（ニックネームなど）は JSON で保存し、受け付ける項目と長さはここで検証する
@@ -60,7 +61,8 @@ USERS_COLUMNS = """(
     legacy_login_id   TEXT,
     profile           TEXT    NOT NULL DEFAULT '{}',
     profile_completed INTEGER NOT NULL DEFAULT 0,
-    created_at        TEXT    NOT NULL
+    created_at        TEXT    NOT NULL,
+    is_admin          INTEGER NOT NULL DEFAULT 0
 )"""
 
 SCHEMA = f"""
@@ -227,6 +229,10 @@ class AuthStore:
         migrate_from_password_auth(self.db_path)
         with closing(self._connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            # 管理者フラグが無かった頃の DB に列を足す
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+            if "is_admin" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
     def _connect(self) -> sqlite3.Connection:
         return connect(self.db_path)
@@ -269,7 +275,8 @@ class AuthStore:
     def get_user(self, user_id: int) -> Dict[str, Any]:
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT id, email, profile, profile_completed FROM users WHERE id = ?", (user_id,)
+                "SELECT id, email, profile, profile_completed, is_admin FROM users WHERE id = ?",
+                (user_id,)
             ).fetchone()
         if not row:
             raise AuthError(404, "ユーザーが見つかりません")
@@ -277,8 +284,17 @@ class AuthStore:
             "id": row["id"],
             "email": row["email"],
             "profileCompleted": bool(row["profile_completed"]),
+            "isAdmin": bool(row["is_admin"]),
             "profile": json.loads(row["profile"]),
         }
+
+    def set_admin(self, user_id: int, is_admin: bool) -> None:
+        """管理者にする／外す（admin.py から使う）。管理者は Web で招待申請を承認できる。"""
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                "UPDATE users SET is_admin = ? WHERE id = ?", (1 if is_admin else 0, user_id))
+        if cur.rowcount == 0:
+            raise AuthError(404, f"ユーザー {user_id} が見つかりません")
 
     def update_profile(self, user_id: int, data: Any) -> Dict[str, Any]:
         profile = normalize_profile(data)
@@ -328,13 +344,14 @@ class AuthStore:
     def list_users(self) -> List[Dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT id, email, legacy_login_id, google_sub IS NOT NULL AS linked, profile, created_at"
-                " FROM users ORDER BY id").fetchall()
+                "SELECT id, email, legacy_login_id, google_sub IS NOT NULL AS linked, profile,"
+                " created_at, is_admin FROM users ORDER BY id").fetchall()
         return [{
             "id": row["id"],
             "email": row["email"],
             "legacyLoginId": row["legacy_login_id"],
             "linked": bool(row["linked"]),
+            "isAdmin": bool(row["is_admin"]),
             "nickname": json.loads(row["profile"]).get("nickname", ""),
             "createdAt": row["created_at"],
         } for row in rows]

@@ -6,6 +6,7 @@ LoC 推論も使うときは、別のターミナルで `python LoC/server.py --
 ログインは Google アカウントのみ。先に Google Cloud で OAuth クライアントを作り、
 環境変数 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET を設定しておく（手順は static/README.md）。
 新規登録は招待制で、`python -m System.admin invite <メールアドレス>` で招待する。
+Web の招待申請を承認する管理者は `python -m System.admin grant-admin <ユーザーID>` で決める。
 
 使い方:
     python main.py
@@ -97,7 +98,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         secure_cookie=public_url.startswith("https://"), loc_upstream=loc_upstream)
     print(f"Onsta: {public_url}/  ← ブラウザで開く（DB: {args.db}）")
     print(f"Google Cloud に登録するリダイレクト URI: {google.redirect_uri}")
-    print("新規登録は招待制: python -m System.admin invite <メールアドレス>")
+    print("新規登録は招待制: python -m System.admin invite <メールアドレス>"
+          "（Web の招待申請を承認する管理者は grant-admin <ユーザーID>）")
     print("LoC 推論も使うときは別ターミナルで: python LoC/server.py --no-static")
     print("スマホ等から使うときは --public-url https://<ngrok のドメイン> を付けて起動し、別ターミナルで: "
           f"ngrok http {args.port} --url <ngrok のドメイン>")

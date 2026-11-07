@@ -185,6 +185,12 @@ class MaterialStore:
         if cur.rowcount == 0:
             raise AuthError(404, "教材が見つかりません")
 
+    def owner_of(self, material_id: int) -> Optional[int]:
+        """教材の持ち主のユーザー ID（教材が無ければ None）。"""
+        with closing(connect(self.db_path)) as conn:
+            row = conn.execute("SELECT user_id FROM materials WHERE id = ?", (material_id,)).fetchone()
+        return row["user_id"] if row else None
+
     def get_image(self, user_id: int, material_id: int) -> Tuple[bytes, str]:
         with closing(connect(self.db_path)) as conn:
             row = conn.execute(

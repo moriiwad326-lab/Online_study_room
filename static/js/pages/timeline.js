@@ -2,7 +2,8 @@
  * pages/timeline.js : タイムライン（#/timeline）
  *
  *  - 「いま勉強中」のユーザーを横並びで表示し、LoC と継続時間を1秒ごとに更新する
- *  - 終了した学習記録は投稿カードとして並べ、平均LoC とスパークラインを添える
+ *  - 自分とフォロー中の人の学習記録を投稿カードとして並べ、平均LoC とスパークラインを添える
+ *    （投稿カードは user.js のユーザーページでも使う）
  */
 
 import { el, esc, formatRelative, formatDuration, formatClock, clampLoc, locLevelClass, thumbHtml } from "../utils.js";
@@ -34,23 +35,26 @@ export async function render(ctx) {
       timers.push(startLiveTicker(liveSection, liveUsers));
     }
 
-    // --- 投稿一覧 ---
-    const posts = store.getTimelinePosts();
+    // --- 投稿一覧（自分＋フォロー中の人） ---
+    const posts = await store.getTimelinePosts();
     const list = el(`<div class="section"></div>`);
     if (posts.length === 0) {
-      list.appendChild(el(`<div class="empty">まだ投稿がありません</div>`));
+      list.appendChild(el(`
+        <div class="empty">
+          まだ投稿がありません。<br>
+          勉強を記録するか、<a class="link-btn" href="#/search">ユーザーをさがして</a>フォローすると、ここに並びます。
+        </div>`));
     } else {
       posts.forEach((post) => list.appendChild(renderPostCard(post)));
+      if (!posts.some((p) => !p.isMine)) {
+        list.appendChild(el(`
+          <div class="empty">
+            <a class="link-btn" href="#/search">ユーザーをさがして</a>フォローすると、その人の記録もここに並びます。
+          </div>`));
+      }
     }
     node.appendChild(list);
-
-    // スパークラインは DOM に入ってからでないと幅が取れないので次フレームで描く
-    requestAnimationFrame(() => {
-      node.querySelectorAll("[data-spark]").forEach((canvas) => {
-        const series = JSON.parse(canvas.dataset.spark);
-        drawSparkline(canvas, series);
-      });
-    });
+    drawSparklines(node);
   }
 
   return {
@@ -117,18 +121,27 @@ function startLiveTicker(section, liveUsers) {
 
 /* ============ 投稿カード ============ */
 
-function renderPostCard(post) {
+/** 投稿カードのスパークラインを描く。DOM に入ってからでないと幅が取れないので次フレームで描く */
+export function drawSparklines(root) {
+  requestAnimationFrame(() => {
+    root.querySelectorAll("[data-spark]").forEach((canvas) => {
+      drawSparkline(canvas, JSON.parse(canvas.dataset.spark));
+    });
+  });
+}
+
+export function renderPostCard(post) {
   const hasLoc = typeof post.avgLoc === "number" && post.locSeries?.length > 1;
 
   const card = el(`
     <article class="card post">
-      <header class="post__head">
-        <div class="avatar" style="background:${post.avatarColor}">${esc(post.initial)}</div>
+      <a class="post__head post__head--link" href="#/users/${post.userId}">
+        <div class="avatar" style="background:${esc(post.avatarColor)}">${esc(post.initial)}</div>
         <div>
           <div class="post__name">${esc(post.userName)}${post.isMine ? '<span class="u-small u-weak">（自分）</span>' : ""}</div>
           <div class="post__time">${formatRelative(post.createdAt)}</div>
         </div>
-      </header>
+      </a>
 
       <div class="post__body">
         <!-- 教材サムネイル：画像が無ければ科目色のプレースホルダで表す -->
@@ -161,7 +174,7 @@ function renderPostCard(post) {
     </article>
   `);
 
-  // いいねの切り替え（localStorage に保存される）
+  // いいねの切り替え（このブラウザの localStorage にだけ保存され、相手には届かない）
   const likeBtn = card.querySelector('[data-act="like"]');
   let liked = post.liked;
   let count = post.likes;

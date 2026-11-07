@@ -16,15 +16,49 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     GET    /api/materials/<id>/image 教材の画像（JSON ではなく画像そのもの）
     GET    /api/books/<isbn>         バーコードの番号から書名・表紙を調べる
 
+    GET    /api/records              自分の学習記録 {records}（新しい順）
+    POST   /api/records              {materialId, durationMin, memo?, locSeries?, source?} → 記録を追加
+    POST   /api/records/import       {records:[...]} localStorage に残っていた記録を一度だけ取り込む
+    DELETE /api/records              自分の学習記録をすべて消す
+    GET    /api/timeline             自分とフォロー中の人の学習記録 {records}
+
+    GET    /api/users?q=<文字>        ニックネームでユーザーを探す {users}
+    GET    /api/users/<id>           公開プロフィール＋フォロー数＋自分との関係 {user}
+    GET    /api/users/<id>/records   その人の学習記録 {records}
+    GET    /api/users/<id>/followers フォロワー {users}
+    GET    /api/users/<id>/following フォロー中 {users}
+    PUT    /api/users/<id>/follow    フォローする（承認なし）{user}
+    DELETE /api/users/<id>/follow    フォローをやめる {user}
+
+    GET    /api/badges               未読の数 {notifications, messages}
+    GET    /api/notifications        通知 {notifications}（新しい順）
+    POST   /api/notifications/read   通知をすべて既読にする
+
+    GET    /api/messages             やりとりのある相手ごとの最新メッセージ {conversations}
+    GET    /api/messages/<id>?after=<メッセージID>  相手とのメッセージ {partner, messages}（相手からの分は既読になる）
+    POST   /api/messages/<id>        {body} → 送る（相互フォローの相手だけ）{message}
+
+    GET    /api/apply                招待申請の引換券の状態 {email, pending}（Cookie が無効なら 404）
+    POST   /api/apply                {message?} → 招待されていない本人が申請する（ログイン不要）
+    GET    /api/invite-requests      自分が紹介した申請 {requests}
+    POST   /api/invite-requests      {email, message?} → 友だちの招待を申請する
+
+    GET    /api/admin/invite-requests?status=pending   招待申請の一覧 {requests}（管理者だけ）
+    POST   /api/admin/invite-requests/<id>/approve     承認して招待を作る（管理者だけ）
+    POST   /api/admin/invite-requests/<id>/reject      却下する（管理者だけ）
+
     GET    /loc                      WebSocket。LoC 推論サーバー（LoC/server.py）へそのまま中継する。
                                      ngrok などで外から開いたときに、ポート1つ（このサーバー）だけ
                                      公開すれば済むようにするため。ログイン中で、同じオリジンの
                                      ページからの接続だけ通す
 
-ユーザーは {id, email, profileCompleted, profile} の形で返す。
+自分は {id, email, profileCompleted, isAdmin, profile} の形で返す。他の人は公開してよい項目だけ
+（social.PUBLIC_PROFILE_KEYS）で、メールアドレスは出さない。
 セッションは HttpOnly の Cookie で持つ。書き込み系は Content-Type: application/json を必須にして、
 SameSite=Lax と合わせて他サイトのフォームから勝手に送られないようにしている。
 Google からの戻りは他サイトからの遷移なので、state の Cookie も SameSite=Lax（Strict だと届かない）。
+招待されていない Google アカウントで戻ってきたら、確認済みのメールアドレスの引換券を
+/api/apply にだけ送られる Cookie で渡す（申請するメールアドレスを入力させないため）。
 """
 
 from __future__ import annotations
@@ -44,15 +78,23 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from .auth import AuthError, AuthStore, NotInvitedError
 from .books import BookLookup, normalize_isbn
 from .google_oauth import FLOW_TTL_SEC, START_PATH, GoogleOAuth, OAuthFailure
+from .invites import TICKET_TTL_SEC, InviteRequestStore
 from .materials import MaterialStore, decode_image, sniff_image_type
+from .records import USER_RECORDS_LIMIT, RecordStore
+from .social import SocialStore
 
 SESSION_COOKIE = "onsta_session"
 # ログイン途中のブラウザを見分ける Cookie（中身は state）。Google まわりのパスにだけ送らせる
 OAUTH_COOKIE = "onsta_oauth_state"
 OAUTH_COOKIE_PATH = "/api/auth/google"
+# 招待申請の引換券（中身はトークン）。申請の API にだけ送らせる
+APPLY_COOKIE = "onsta_apply"
+APPLY_COOKIE_PATH = "/api/apply"
 MAX_BODY_BYTES = 16 * 1024
 # 画像を data URL（base64 で 4/3 倍）で受け取るので、教材の追加だけ大きめに
 MAX_MATERIAL_BODY_BYTES = 3 * 1024 * 1024
+# localStorage の記録をまとめて取り込むときだけ大きめに
+MAX_IMPORT_BODY_BYTES = 2 * 1024 * 1024
 # 推論サーバーへ中継しないヘッダー（Cookie は推論サーバーに渡す必要がない）
 LOC_DROP_HEADERS = {"host", "cookie"}
 CRLF = "\r\n"
@@ -64,6 +106,9 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     materials: MaterialStore
     books: BookLookup
     google: GoogleOAuth
+    social: SocialStore
+    records: RecordStore
+    invites: InviteRequestStore
     secure_cookie = False
     loc_upstream: Optional[Tuple[str, int]] = None  # 推論サーバーの (host, port)。None なら中継しない
 
@@ -80,6 +125,30 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("DELETE", r"/api/materials/(\d+)", "_delete_material"),
         ("GET", r"/api/materials/(\d+)/image", "_material_image"),
         ("GET", r"/api/books/([0-9Xx-]{10,17})", "_lookup_book"),
+        ("GET", r"/api/records", "_list_records"),
+        ("POST", r"/api/records", "_add_record"),
+        ("POST", r"/api/records/import", "_import_records"),
+        ("DELETE", r"/api/records", "_delete_records"),
+        ("GET", r"/api/timeline", "_timeline"),
+        ("GET", r"/api/users", "_search_users"),
+        ("GET", r"/api/users/(\d+)", "_get_user"),
+        ("GET", r"/api/users/(\d+)/records", "_user_records"),
+        ("GET", r"/api/users/(\d+)/followers", "_followers"),
+        ("GET", r"/api/users/(\d+)/following", "_following"),
+        ("PUT", r"/api/users/(\d+)/follow", "_follow"),
+        ("DELETE", r"/api/users/(\d+)/follow", "_unfollow"),
+        ("GET", r"/api/badges", "_badges"),
+        ("GET", r"/api/notifications", "_list_notifications"),
+        ("POST", r"/api/notifications/read", "_read_notifications"),
+        ("GET", r"/api/messages", "_list_conversations"),
+        ("GET", r"/api/messages/(\d+)", "_get_thread"),
+        ("POST", r"/api/messages/(\d+)", "_send_message"),
+        ("GET", r"/api/apply", "_apply_status"),
+        ("POST", r"/api/apply", "_apply"),
+        ("GET", r"/api/invite-requests", "_list_my_requests"),
+        ("POST", r"/api/invite-requests", "_refer"),
+        ("GET", r"/api/admin/invite-requests", "_admin_list_requests"),
+        ("POST", r"/api/admin/invite-requests/(\d+)/(approve|reject)", "_admin_decide"),
     ]
 
     # ---- 振り分け ----
@@ -141,15 +210,19 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             if not started or not hmac.compare_digest(state.encode("utf-8"), started.encode("utf-8")):
                 raise OAuthFailure("expired")
             identity = self.google.finish(state, query.get("code", [""])[0], query.get("error", [""])[0])
-            user = self.store.login_with_google(identity.sub, identity.email)
+            try:
+                user = self.store.login_with_google(identity.sub, identity.email)
+            except NotInvitedError:
+                # Google が確認したメールアドレスで招待申請できるよう、引換券を渡しておく
+                ticket = self.invites.create_ticket(identity.email)
+                self.log_message("招待されていない Google アカウントのログインを拒否しました")
+                self._redirect("/#/login?error=not_invited", [
+                    clear_state, self._cookie_header(APPLY_COOKIE, ticket, TICKET_TTL_SEC, APPLY_COOKIE_PATH)])
+                return
         except OAuthFailure as err:
             if err.detail:
                 self.log_message("Google ログインに失敗: %s", err.detail)
             self._redirect(f"/#/login?error={err.code}", [clear_state])
-            return
-        except NotInvitedError:
-            self.log_message("招待されていない Google アカウントのログインを拒否しました")
-            self._redirect("/#/login?error=not_invited", [clear_state])
             return
         except AuthError as err:
             self.log_message("Google ログインに失敗: %s", err.message)
@@ -209,7 +282,11 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
 
     def _material_image(self, material_id: int) -> None:
         user = self._require_user()
-        data, image_type = self.materials.get_image(user["id"], material_id)
+        # 自分の教材か、フォロー中の人の教材（タイムラインの記録に出る）だけ見られる
+        owner = self.materials.owner_of(material_id)
+        if owner is None or (owner != user["id"] and not self.social.is_following(user["id"], owner)):
+            raise AuthError(404, "画像がありません")
+        data, image_type = self.materials.get_image(owner, material_id)
         self.send_response(200)
         self.send_header("Content-Type", image_type)
         self.send_header("Content-Length", str(len(data)))
@@ -222,6 +299,132 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def _lookup_book(self, raw_isbn: str) -> None:
         self._require_user()
         self._send_json(200, {"book": self.books.lookup(raw_isbn)})
+
+    # ---- 学習記録 ----
+
+    def _list_records(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"records": self.records.list_for_user(user["id"])})
+
+    def _add_record(self) -> None:
+        user = self._require_user()
+        self._send_json(201, {"record": self.records.add_record(user["id"], self._read_json())})
+
+    def _import_records(self) -> None:
+        user = self._require_user()
+        body = self._read_json(MAX_IMPORT_BODY_BYTES)
+        self._send_json(200, self.records.import_records(user["id"], body.get("records")))
+
+    def _delete_records(self) -> None:
+        user = self._require_user()
+        self.records.delete_all(user["id"])
+        self._send_json(200, {"ok": True})
+
+    def _timeline(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"records": self.records.timeline(user["id"])})
+
+    # ---- ユーザー・フォロー ----
+
+    def _search_users(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"users": self.social.search_users(user["id"], self._query_param("q"))})
+
+    def _get_user(self, user_id: int) -> None:
+        user = self._require_user()
+        self._send_json(200, {"user": self.social.get_user(user["id"], user_id)})
+
+    def _user_records(self, user_id: int) -> None:
+        user = self._require_user()
+        target = self.social.get_user(user["id"], user_id)  # 見えない（初回設定前など）ユーザーなら 404
+        records = self.records.list_for_user(user_id, limit=USER_RECORDS_LIMIT)
+        # 教材の画像はフォロー中の人にだけ見せるので、それ以外には画像なしとして渡す
+        if not (target["isMe"] or target["isFollowing"]):
+            for record in records:
+                if record["material"]:
+                    record["material"]["hasImage"] = False
+        self._send_json(200, {"records": records})
+
+    def _followers(self, user_id: int) -> None:
+        user = self._require_user()
+        self._send_json(200, {"users": self.social.list_followers(user["id"], user_id)})
+
+    def _following(self, user_id: int) -> None:
+        user = self._require_user()
+        self._send_json(200, {"users": self.social.list_following(user["id"], user_id)})
+
+    def _follow(self, user_id: int) -> None:
+        user = self._require_user()
+        self._read_json()
+        self._send_json(200, {"user": self.social.follow(user["id"], user_id)})
+
+    def _unfollow(self, user_id: int) -> None:
+        user = self._require_user()
+        self._send_json(200, {"user": self.social.unfollow(user["id"], user_id)})
+
+    # ---- 通知 ----
+
+    def _badges(self) -> None:
+        user = self._require_user()
+        self._send_json(200, self.social.badges(user["id"]))
+
+    def _list_notifications(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"notifications": self.social.list_notifications(user["id"])})
+
+    def _read_notifications(self) -> None:
+        user = self._require_user()
+        self._read_json()
+        self.social.mark_notifications_read(user["id"])
+        self._send_json(200, {"ok": True})
+
+    # ---- メッセージ ----
+
+    def _list_conversations(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"conversations": self.social.list_conversations(user["id"])})
+
+    def _get_thread(self, partner_id: int) -> None:
+        user = self._require_user()
+        after = self._query_param("after") or "0"
+        if not after.isdigit() or len(after) > 18:
+            raise AuthError(400, "after の指定が正しくありません")
+        self._send_json(200, self.social.get_thread(user["id"], partner_id, int(after)))
+
+    def _send_message(self, partner_id: int) -> None:
+        user = self._require_user()
+        body = self._read_json()
+        self._send_json(201, {"message": self.social.send_message(user["id"], partner_id, body.get("body"))})
+
+    # ---- 招待申請 ----
+
+    def _apply_status(self) -> None:
+        self._send_json(200, self.invites.ticket_status(self._cookie(APPLY_COOKIE)))
+
+    def _apply(self) -> None:
+        body = self._read_json()
+        request = self.invites.apply_with_ticket(self._cookie(APPLY_COOKIE), body.get("message"))
+        self._send_json(201, {"request": request}, extra_cookies=[
+            self._cookie_header(APPLY_COOKIE, "", 0, APPLY_COOKIE_PATH)])
+
+    def _list_my_requests(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"requests": self.invites.list_mine(user["id"])})
+
+    def _refer(self) -> None:
+        user = self._require_user()
+        body = self._read_json()
+        self._send_json(201, {"request": self.invites.refer(user["id"], body.get("email"), body.get("message"))})
+
+    def _admin_list_requests(self) -> None:
+        self._require_admin()
+        self._send_json(200, {"requests": self.invites.list_requests(self._query_param("status") or None)})
+
+    def _admin_decide(self, request_id: int, action: str) -> None:
+        admin = self._require_admin()
+        self._read_json()
+        decide = self.invites.approve if action == "approve" else self.invites.reject
+        self._send_json(200, {"request": decide(admin["id"], request_id)})
 
     # ---- LoC 推論の中継（WebSocket） ----
 
@@ -304,6 +507,17 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             raise AuthError(401, "ログインしてください")
         return user
 
+    def _require_admin(self) -> Dict[str, Any]:
+        user = self._require_user()
+        if not user["isAdmin"]:
+            raise AuthError(403, "管理者だけが使えます")
+        return user
+
+    def _query_param(self, name: str) -> Optional[str]:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        values = query.get(name)
+        return values[0] if values else None
+
     def _read_json(self, max_bytes: int = MAX_BODY_BYTES) -> Dict[str, Any]:
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if content_type != "application/json":
@@ -323,7 +537,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             raise AuthError(400, "JSON の形式が正しくありません")
         return body
 
-    def _send_json(self, status: int, payload: Dict[str, Any], session: Optional[str] = None) -> None:
+    def _send_json(self, status: int, payload: Dict[str, Any], session: Optional[str] = None,
+                   extra_cookies: Iterable[str] = ()) -> None:
         """session に文字列を渡すと Cookie を発行する（"" なら削除）。"""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -331,6 +546,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         if session is not None:
             self.send_header("Set-Cookie", self._session_cookie_header(session))
+        for cookie in extra_cookies:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(data)
 
@@ -368,12 +585,19 @@ def _pipe(src: socket.socket, dst: socket.socket) -> None:
 def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
                 materials: MaterialStore, books: BookLookup, google: GoogleOAuth,
                 secure_cookie: bool = False,
-                loc_upstream: Optional[Tuple[str, int]] = None) -> http.server.ThreadingHTTPServer:
+                loc_upstream: Optional[Tuple[str, int]] = None,
+                social: Optional[SocialStore] = None,
+                records: Optional[RecordStore] = None,
+                invites: Optional[InviteRequestStore] = None) -> http.server.ThreadingHTTPServer:
+    """social / records / invites を省略すると、store と同じ DB ファイルで作る。"""
     handler_cls = type("BoundAppHandler", (AppHandler,), {
         "store": store,
         "materials": materials,
         "books": books,
         "google": google,
+        "social": social or SocialStore(store.db_path),
+        "records": records or RecordStore(store.db_path),
+        "invites": invites or InviteRequestStore(store.db_path),
         "secure_cookie": secure_cookie,
         "loc_upstream": loc_upstream,
     })
