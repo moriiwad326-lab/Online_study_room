@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -40,10 +41,11 @@ from presence import DEFAULT_PRESENCE_CHECKPOINT, PresenceGate
 from train import DEFAULT_CHECKPOINT
 
 
-class LoCPredictor:
-    """フレームを1枚ずつ与えると、窓が埋まり次第 LoC（0〜100）を返す推論器。
+class LoCEngine:
+    """全セッションで共有する、状態を持たない部分（LoCModel・ConvNeXt・在席判定のモデル）。
 
-    `HandFeatureExtractor` と同様にステートフル。別の映像に移るときは `reset()` を呼ぶ。
+    `new_session()` で映像ごとの `LoCSession` を作る。GPU を使う処理は `inference_lock` で
+    1つずつ実行するので、複数のスレッドから同時にセッションを動かしてよい。
     """
 
     def __init__(
@@ -57,16 +59,13 @@ class LoCPredictor:
         )
         checkpoint = torch.load(Path(checkpoint_path), map_location=self.device)
         self.seq_len = int(checkpoint.get("seq_len", 12))
-        self.progress = 0
 
         self.model = build_model(dropout=float(checkpoint.get("dropout", 0.2)))
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval().to(self.device)
 
         self.image_extractor = ImageFeatureExtractor(device=str(self.device))
-        self.hand_extractor = HandFeatureExtractor()
-        self._image_buffer: deque = deque(maxlen=self.seq_len)
-        self._hand_buffer: deque = deque(maxlen=self.seq_len)
+        self.inference_lock = threading.Lock()
 
         self.presence: Optional[PresenceGate] = None
         if presence_path is not None and Path(presence_path).exists():
@@ -74,6 +73,36 @@ class LoCPredictor:
         elif presence_path is not None:
             print(f"在席判定器が見つからないため、不在時の 0 固定は無効です: {presence_path}",
                   flush=True)
+
+    def new_session(self) -> "LoCSession":
+        return LoCSession(self)
+
+    def close(self):
+        self.image_extractor.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+class LoCSession:
+    """1つの映像ぶんの状態（窓・手の速度と追跡・在席の履歴）を持つ。
+
+    フレームを1枚ずつ与えると、窓が埋まり次第 LoC（0〜100）を返す。1つのセッションには
+    1つの映像だけを順番に流し、別の映像に移るときは `reset()` を呼ぶか別のセッションを作る。
+    """
+
+    def __init__(self, engine: LoCEngine):
+        self.engine = engine
+        self.seq_len = engine.seq_len
+        # MediaPipe は追跡状態を持つので、ConvNeXt と違ってセッションごとに別々に持つ
+        self.hand_extractor = HandFeatureExtractor()
+        self._image_buffer: deque = deque(maxlen=self.seq_len)
+        self._hand_buffer: deque = deque(maxlen=self.seq_len)
+        self.presence = engine.presence.fork() if engine.presence is not None else None
+        self._lock = threading.Lock()  # 推論中に close() されないようにする
 
     @property
     def warmup_remaining(self) -> int:
@@ -87,39 +116,75 @@ class LoCPredictor:
 
     def reset(self):
         """窓と速度計算の状態を捨てる（別の映像・別の被験者に移るとき）。"""
-        self._image_buffer.clear()
-        self._hand_buffer.clear()
-        self.hand_extractor.reset()
-        if self.presence is not None:
-            self.presence.reset()
+        with self._lock:
+            self._image_buffer.clear()
+            self._hand_buffer.clear()
+            self.hand_extractor.reset()
+            if self.presence is not None:
+                self.presence.reset()
 
     def push(self, frame_bgr: np.ndarray) -> Optional[float]:
         """1フレーム投入する。窓が埋まっていなければ None を返す。"""
-        image_feature = self.image_extractor.extract(frame_bgr)
-        self._image_buffer.append(image_feature)
-        self._hand_buffer.append(self.hand_extractor.extract(frame_bgr))
-        absent = self.presence is not None and self.presence.push(image_feature)
+        engine = self.engine
+        with self._lock:
+            with engine.inference_lock:
+                image_feature = engine.image_extractor.extract(frame_bgr)
+                absent = self.presence is not None and self.presence.push(image_feature)
+            self._image_buffer.append(image_feature)
+            self._hand_buffer.append(self.hand_extractor.extract(frame_bgr))
 
-        if len(self._image_buffer) < self.seq_len:
-            return None
-        if absent:
-            return LOC_MIN
+            if len(self._image_buffer) < self.seq_len:
+                return None
+            if absent:
+                return LOC_MIN
 
-        img_feat = torch.from_numpy(np.stack(self._image_buffer)).unsqueeze(0).to(self.device)
-        hand_feat = torch.from_numpy(np.stack(self._hand_buffer)).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            prediction = self.model(img_feat, hand_feat)
-        return float(prediction.item())
+            img_feat = torch.from_numpy(np.stack(self._image_buffer)).unsqueeze(0).to(engine.device)
+            hand_feat = torch.from_numpy(np.stack(self._hand_buffer)).unsqueeze(0).to(engine.device)
+            with engine.inference_lock, torch.no_grad():
+                prediction = engine.model(img_feat, hand_feat)
+                return float(prediction.item())
 
     def close(self):
-        self.image_extractor.close()
-        self.hand_extractor.close()
+        with self._lock:
+            self.hand_extractor.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+class LoCPredictor(LoCEngine):
+    """映像を1つだけ扱うときに使う、エンジンとセッションをまとめた推論器。"""
+
+    def __init__(
+        self,
+        checkpoint_path: str | Path = DEFAULT_CHECKPOINT,
+        device: Optional[str] = None,
+        presence_path: Optional[str | Path] = DEFAULT_PRESENCE_CHECKPOINT,
+    ):
+        super().__init__(checkpoint_path, device, presence_path)
+        self.progress = 0
+        self._session = self.new_session()
+
+    @property
+    def warmup_remaining(self) -> int:
+        return self._session.warmup_remaining
+
+    @property
+    def latest_hand_features(self) -> Optional[np.ndarray]:
+        return self._session.latest_hand_features
+
+    def reset(self):
+        self._session.reset()
+
+    def push(self, frame_bgr: np.ndarray) -> Optional[float]:
+        return self._session.push(frame_bgr)
+
+    def close(self):
+        self._session.close()
+        super().close()
 
 
 def open_source(source: str) -> cv2.VideoCapture:

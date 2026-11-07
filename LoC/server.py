@@ -4,7 +4,7 @@
 
 - HTTP  http://localhost:8000/      … ../static をそのまま配信（カメラは localhost なら使える）
 - WS    ws://localhost:8765/loc     … フロントの `js/locClient.js` が送るカメラフレームを受け取り、
-                                      `LoCPredictor` で推定した LoC を返す
+                                      `LoCSession` で推定した LoC を返す
 
 プロトコル（`static/README.md` の「LoC API の仕様」と同じ）:
     受信  { "type": "frame",  "timestamp": <ms>, "image": "<JPEGのBase64>" }
@@ -16,8 +16,11 @@
 `--rate` と同じ。既定 5 秒）ごとの1枚だけ。間引きはフロントの timestamp（撮影時刻）で行う。
 モデルはフロントと同じ 0〜100 を出すので、小数第1位に丸めてそのまま返す。
 
-`LoCPredictor` はステートフル（直近 seq_len 枚の窓と手の速度計算）なので、同時に計測できる
-のは1接続だけ。新しい接続が来たら窓を捨ててそちらに切り替える。
+計測中に届いたフレームはすべて `LoC/recordings/<yyyymmdd>/<HHMMSS>.mp4` に、推定した LoC は
+同名の `.csv` に保存する（`recorder.py`）。保存先は `--record-dir` で変えられる。
+
+複数の接続を同時に計測できる。モデルは `LoCEngine` を全接続で共有し、窓・手の速度と追跡・
+在席の履歴は接続ごとの `LoCSession` に分ける。GPU を使う処理は1つずつ順番に実行する。
 
 使い方:
     python LoC/server.py                      # → http://localhost:8000/ を開く
@@ -47,7 +50,8 @@ import numpy as np
 from websockets.asyncio.server import ServerConnection, serve
 
 from core import LOC_MAX, LOC_MIN
-from infer import LoCPredictor
+from infer import LoCEngine, LoCSession
+from recorder import DEFAULT_RECORD_ROOT, SessionRecorder
 from train import DEFAULT_CHECKPOINT
 
 DEFAULT_STATIC_DIR = PACKAGE_ROOT.parent / "static"
@@ -71,29 +75,31 @@ def decode_jpeg(image_b64: str) -> Optional[np.ndarray]:
 
 
 class LoCServer:
-    def __init__(self, predictor: LoCPredictor, interval: float):
-        self.predictor = predictor
+    def __init__(self, engine: LoCEngine, interval: float,
+                 record_dir: Optional[Path] = None, record_fps: float = 5.0):
+        self.engine = engine
         self.interval = interval
-        self._active: Optional[ServerConnection] = None
-        self._busy = False
+        self.record_dir = record_dir  # None なら録画しない
+        self.record_fps = record_fps
 
     async def handle(self, connection: ServerConnection) -> None:
         if connection.request.path != "/loc":
             await connection.close(code=1008, reason="path must be /loc")
             return
 
-        # 新しい接続に切り替える（窓・速度の状態を捨てる）
-        self._active = connection
-        self.predictor.reset()
+        # MediaPipe の初期化やデコード、推論はブロッキングなので、他の接続を止めないよう
+        # スレッドに逃がす。同じ接続の処理は await で順番に進むので、順序は入れ替わらない
+        session = await asyncio.to_thread(self.engine.new_session)
         next_sample_at: Optional[float] = None  # 秒（フロントの timestamp 基準）
         last_sample_at: Optional[float] = None
-        print(f"接続: {connection.remote_address}", flush=True)
-        await self._send_warmup(connection, timestamp=0)
+        recorder = (SessionRecorder(self.record_dir, fps=self.record_fps)
+                    if self.record_dir is not None else None)
+        client = connection.remote_address
+        print(f"接続: {client}", flush=True)
 
         try:
+            await self._send_warmup(connection, session, timestamp=0)
             async for raw in connection:
-                if connection is not self._active:
-                    break  # 後から来た接続に計測を譲った
                 try:
                     message = json.loads(raw)
                 except (TypeError, ValueError):
@@ -103,46 +109,67 @@ class LoCServer:
 
                 timestamp = int(message.get("timestamp") or 0)
                 now = timestamp / 1000.0
+
+                # 録画するフレームは推論の間引きとは関係なくすべて残す
+                frame = None
+                if recorder is not None:
+                    frame = await asyncio.to_thread(decode_jpeg, message["image"])
+                    if frame is not None:
+                        recorder = await asyncio.to_thread(
+                            self._record, recorder, recorder.write_frame, frame, timestamp)
+
                 if next_sample_at is not None and now < next_sample_at:
                     continue
-                if self._busy:
-                    continue  # 前のフレームを処理中なら、次に来るフレームで拾う
 
-                frame = decode_jpeg(message["image"])
+                if frame is None:
+                    frame = await asyncio.to_thread(decode_jpeg, message["image"])
                 if frame is None:
                     continue
 
                 if last_sample_at is not None and now - last_sample_at > self.interval * GAP_RESET_FACTOR:
-                    self.predictor.hand_extractor.reset()
+                    session.hand_extractor.reset()
                 next_sample_at = now + self.interval
                 last_sample_at = now
 
-                # ConvNeXt + MediaPipe はブロッキングなのでスレッドに逃がす
-                self._busy = True
-                try:
-                    loc = await asyncio.to_thread(self.predictor.push, frame)
-                finally:
-                    self._busy = False
+                loc = await asyncio.to_thread(session.push, frame)
 
                 if loc is None:
-                    await self._send_warmup(connection, timestamp)
+                    await self._send_warmup(connection, session, timestamp)
                 else:
                     percent = to_percent(loc)
-                    print(f"LoC = {loc:.1f}", flush=True)
+                    print(f"[{client}] LoC = {loc:.1f}", flush=True)
+                    if recorder is not None:
+                        recorder = await asyncio.to_thread(
+                            self._record, recorder, recorder.write_loc, timestamp, percent)
                     await connection.send(json.dumps(
                         {"type": "loc", "timestamp": timestamp, "loc": percent}))
         finally:
-            if connection is self._active:
-                self._active = None
-            print("切断", flush=True)
+            if recorder is not None:
+                await asyncio.to_thread(recorder.close)
+                if recorder.video_path is not None:
+                    print(f"録画を保存しました: {recorder.video_path}", flush=True)
+            await asyncio.to_thread(session.close)
+            print(f"切断: {client}", flush=True)
 
-    async def _send_warmup(self, connection: ServerConnection, timestamp: int) -> None:
-        remaining = self.predictor.warmup_remaining
+    @staticmethod
+    def _record(recorder: SessionRecorder, write, *args) -> Optional[SessionRecorder]:
+        """録画に失敗しても計測は止めない。失敗したらこの接続の録画をやめる（None を返す）。"""
+        try:
+            write(*args)
+            return recorder
+        except Exception as exc:  # noqa: BLE001 - ディスク容量不足なども含めて計測を続ける
+            print(f"録画を中止しました: {exc}", flush=True)
+            recorder.close()
+            return None
+
+    async def _send_warmup(self, connection: ServerConnection, session: LoCSession,
+                           timestamp: int) -> None:
+        remaining = session.warmup_remaining
         await connection.send(json.dumps({
             "type": "warmup",
             "timestamp": timestamp,
             "remaining": remaining,
-            "total": self.predictor.seq_len,
+            "total": session.seq_len,
             "seconds": round(remaining * self.interval),
         }))
 
@@ -180,17 +207,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--static-dir", default=str(DEFAULT_STATIC_DIR))
     parser.add_argument("--no-static", action="store_true", help="フロントを配信しない")
     parser.add_argument("--device", default=None, help="cpu / cuda（既定は自動判定）")
+    parser.add_argument("--record-dir", default=str(DEFAULT_RECORD_ROOT),
+                        help="計測中の動画と LoC を保存するフォルダ（この下に yyyymmdd/ を作る）")
+    parser.add_argument("--record-fps", type=float, default=5.0,
+                        help="保存する動画のフレームレート。フロントの送信 fps（既定 5）に揃える")
     args = parser.parse_args(argv)
 
     print("モデルを読み込み中...", flush=True)
-    with LoCPredictor(args.checkpoint, device=args.device) as predictor:
-        server = LoCServer(predictor, interval=args.interval)
+    with LoCEngine(args.checkpoint, device=args.device) as engine:
+        server = LoCServer(engine, interval=args.interval,
+                           record_dir=Path(args.record_dir), record_fps=args.record_fps)
         httpd = None
         if not args.no_static:
             httpd = start_static_server(Path(args.static_dir), args.http_port)
         print(f"\n推論サーバー: ws://{args.host}:{args.ws_port}/loc"
-              f"（{Path(args.checkpoint).name}, device={predictor.device}, "
-              f"{args.interval:g}秒ごと, 最初の推定まで約{predictor.seq_len * args.interval:.0f}秒）")
+              f"（{Path(args.checkpoint).name}, device={engine.device}, "
+              f"{args.interval:g}秒ごと, 最初の推定まで約{engine.seq_len * args.interval:.0f}秒）")
+        print(f"録画の保存先: {Path(args.record_dir) / 'yyyymmdd'}")
         if httpd:
             print(f"フロント:     http://localhost:{args.http_port}/  ← ブラウザで開く")
         print("終了は Ctrl+C\n", flush=True)

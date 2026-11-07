@@ -19,6 +19,7 @@ MediaPipe Hands の検出フラグを使わないのは、真上からの画角�
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from collections import deque
@@ -78,6 +79,12 @@ class PresenceGate:
 
     def reset(self):
         self._history.clear()
+
+    def fork(self) -> "PresenceGate":
+        """モデルを共有し、履歴だけ別に持つ判定器を返す（映像ごとに分けるとき用）。"""
+        forked = copy.copy(self)
+        forked._history = deque(maxlen=self._history.maxlen)
+        return forked
 
     def push(self, image_feature: np.ndarray) -> bool:
         """1フレームぶんの特徴を入れ、窓が埋まっていて全フレーム不在なら True を返す。"""

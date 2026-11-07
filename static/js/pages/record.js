@@ -276,9 +276,9 @@ function renderMeasure(ctx) {
           Webカメラで手の動きをとらえ、集中度（LoC：0〜100）をリアルタイムに推定します。
         </p>
         <div class="notice" style="margin-bottom:12px">
-          <strong>映像は保存されません。</strong><br>
-          カメラの映像はこの端末の中で処理され、推定に必要な情報だけが使われます。
-          録画・アップロード・第三者への提供は行いません。計測はいつでも停止できます。
+          <strong>計測中の映像は録画・保存されます。</strong><br>
+          カメラの映像は LoC 推論サーバーに送られ、推定した LoC と一緒に動画として保存されます（集中度推定の改善に使います）。
+          第三者への提供は行いません。計測はいつでも停止できます。
         </div>
         <label class="checkbox" style="margin-bottom:12px">
           <input type="checkbox" data-consent>

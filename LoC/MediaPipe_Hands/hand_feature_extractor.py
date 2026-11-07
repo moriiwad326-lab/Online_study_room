@@ -26,6 +26,7 @@ import contextlib
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -78,6 +79,9 @@ _BENIGN_NATIVE_LOGS = (
 )
 
 
+_NATIVE_STDERR_LOCK = threading.RLock()
+
+
 @contextlib.contextmanager
 def _filter_native_stderr(buffer):
     """ブロック中の fd 2 への出力を捕捉し、既知の無害なログ以外を stderr に流し直す。
@@ -87,29 +91,31 @@ def _filter_native_stderr(buffer):
     Args:
         buffer: 書き込み先の一時ファイル（`fileno()` を持つ、シーク可能なもの）。
     """
-    sys.stderr.flush()
-    saved_fd = os.dup(2)
-    buffer.seek(0)
-    buffer.truncate()
-    os.dup2(buffer.fileno(), 2)
-    try:
-        yield
-    finally:
-        # ネイティブ層は fd に直接書くのでフラッシュ不要だが、
-        # ブロック内で Python 側が stderr へ書いていた場合に備える
+    # fd 2 はプロセスで1つなので、別スレッドと重なると元の stderr に戻せなくなる
+    with _NATIVE_STDERR_LOCK:
         sys.stderr.flush()
-        os.dup2(saved_fd, 2)
-        os.close(saved_fd)
-
+        saved_fd = os.dup(2)
         buffer.seek(0)
-        captured = buffer.read().decode("utf-8", errors="replace")
-        passthrough = [
-            line
-            for line in captured.splitlines()
-            if line.strip() and not any(known in line for known in _BENIGN_NATIVE_LOGS)
-        ]
-        if passthrough:
-            sys.stderr.write("\n".join(passthrough) + "\n")
+        buffer.truncate()
+        os.dup2(buffer.fileno(), 2)
+        try:
+            yield
+        finally:
+            # ネイティブ層は fd に直接書くのでフラッシュ不要だが、
+            # ブロック内で Python 側が stderr へ書いていた場合に備える
+            sys.stderr.flush()
+            os.dup2(saved_fd, 2)
+            os.close(saved_fd)
+
+            buffer.seek(0)
+            captured = buffer.read().decode("utf-8", errors="replace")
+            passthrough = [
+                line
+                for line in captured.splitlines()
+                if line.strip() and not any(known in line for known in _BENIGN_NATIVE_LOGS)
+            ]
+            if passthrough:
+                sys.stderr.write("\n".join(passthrough) + "\n")
 
 # フレーム間差分を取る対象（静的ブロック内のインデックス）。
 # 手首の絶対位置(x, y) → 手全体の移動、指先の相対座標 → 指の動き。

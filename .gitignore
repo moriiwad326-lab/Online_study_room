@@ -11,3 +11,6 @@ LoC/checkpoints/
 
 # アプリのユーザーDB
 System/data/
+
+# LoC 計測中の録画
+LoC/recordings/
