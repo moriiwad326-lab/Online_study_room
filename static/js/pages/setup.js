@@ -18,7 +18,7 @@ export async function render({ navigate }) {
   const user = store.getUser();
   const node = authShell(`
     <div class="auth__welcome">
-      <h1 class="auth__title">ようこそ、${esc(user.loginId)} さん</h1>
+      <h1 class="auth__title">ようこそ、${esc(user.email)} さん</h1>
       <p class="u-muted">
         はじめにマイページを設定しましょう。<span class="u-bold">ニックネームだけ必須</span>で、
         ほかの項目は空欄のままでもあとから設定できます。

@@ -12,5 +12,8 @@ LoC/checkpoints/
 # アプリのユーザーDB
 System/data/
 
+# Google Cloud からダウンロードした OAuth クライアントの設定（シークレット入り）
+client_secret*.json
+
 # LoC 計測中の録画
 LoC/recordings/

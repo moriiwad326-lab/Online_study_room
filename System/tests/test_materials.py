@@ -5,14 +5,14 @@ import json
 import threading
 import urllib.error
 import urllib.request
-from http.cookiejar import CookieJar
 
 import pytest
 
 from System.auth import AuthError, AuthStore
 from System.books import BookLookup, normalize_isbn
 from System.materials import MaterialStore, decode_image
-from System.server import make_server
+from System.server import SESSION_COOKIE, make_server
+from System.tests.helpers import create_user, dummy_google
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
@@ -25,7 +25,7 @@ def data_url(raw, mime="image/png"):
 @pytest.fixture
 def stores(tmp_path):
     db = tmp_path / "t.db"
-    auth = AuthStore(db, iterations=1_000)
+    auth = AuthStore(db)
     return auth, MaterialStore(db)
 
 
@@ -126,13 +126,13 @@ def test_decode_image():
 
 def test_starts_empty(stores):
     auth, materials = stores
-    user = auth.register("taro", "secret123")
+    user = create_user(auth, "taro")
     assert materials.list_for_user(user["id"]) == {"categories": [], "materials": []}
 
 
 def test_add_category_and_material(stores):
     auth, materials = stores
-    user = auth.register("taro", "secret123")
+    user = create_user(auth, "taro")
     cat = materials.add_category(user["id"], " 数学 ", "#5B5BD6")
     assert cat["name"] == "数学" and cat["color"] == "#5b5bd6"
 
@@ -148,20 +148,20 @@ def test_add_category_and_material(stores):
 
 def test_duplicate_category_name(stores):
     auth, materials = stores
-    user = auth.register("taro", "secret123")
+    user = create_user(auth, "taro")
     materials.add_category(user["id"], "数学", "#5b5bd6")
     with pytest.raises(AuthError) as err:
         materials.add_category(user["id"], "数学", "#e8724c")
     assert err.value.status == 409
     # 別のユーザーなら同じ名前でもよい
-    other = auth.register("jiro", "secret123")
+    other = create_user(auth, "jiro")
     materials.add_category(other["id"], "数学", "#5b5bd6")
 
 
 def test_cannot_touch_other_users_data(stores):
     auth, materials = stores
-    taro = auth.register("taro", "secret123")
-    jiro = auth.register("jiro", "secret123")
+    taro = create_user(auth, "taro")
+    jiro = create_user(auth, "jiro")
     cat = materials.add_category(taro["id"], "数学", "#5b5bd6")
     m = materials.add_material(taro["id"], "青チャート", cat["id"], image=(PNG, "image/png"))
 
@@ -186,7 +186,7 @@ def test_cannot_touch_other_users_data(stores):
 ])
 def test_material_validation(stores, title, category, field):
     auth, materials = stores
-    user = auth.register("taro", "secret123")
+    user = create_user(auth, "taro")
     materials.add_category(user["id"], "数学", "#5b5bd6")
     with pytest.raises(AuthError) as err:
         materials.add_material(user["id"], title, category)
@@ -205,24 +205,31 @@ def client(tmp_path):
             "title": "青チャート", "cover": "https://cover.openbd.jp/9784101010014.jpg"}}]}),
         fetch_bytes=lambda url: JPEG,
     )
-    httpd = make_server("127.0.0.1", 0, static, AuthStore(db, iterations=1_000), MaterialStore(db), books)
+    auth = AuthStore(db)
+    httpd = make_server("127.0.0.1", 0, static, auth, MaterialStore(db), books, dummy_google())
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    session = {}
 
     def call(method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
+        if session:
+            req.add_header("Cookie", f"{SESSION_COOKIE}={session['token']}")
         try:
-            with opener.open(req) as res:
+            with urllib.request.urlopen(req) as res:
                 raw = res.read()
                 is_json = res.headers["Content-Type"].startswith("application/json")
                 return res.status, json.loads(raw) if is_json else raw, res.headers
         except urllib.error.HTTPError as err:
             return err.code, json.loads(err.read()), err.headers
 
+    def login(name):
+        session["token"] = auth.create_session(create_user(auth, name)["id"])
+
+    call.login = login
     yield call
     httpd.shutdown()
     httpd.server_close()
@@ -230,7 +237,7 @@ def client(tmp_path):
 
 def test_material_api_flow(client):
     assert client("GET", "/api/materials")[0] == 401
-    client("POST", "/api/auth/register", {"loginId": "taro", "password": "secret123"})
+    client.login("taro")
     assert client("GET", "/api/materials")[1] == {"categories": [], "materials": []}
 
     status, body, _ = client("POST", "/api/categories", {"name": "数学", "color": "#5b5bd6"})
@@ -260,7 +267,7 @@ def test_material_api_flow(client):
 
 
 def test_material_api_errors(client):
-    client("POST", "/api/auth/register", {"loginId": "taro", "password": "secret123"})
+    client.login("taro")
     status, body, _ = client("GET", "/api/books/9784101010015")
     assert status == 400 and body["field"] == "isbn"
     status, body, _ = client("POST", "/api/materials", {"title": "x", "categoryId": 1})

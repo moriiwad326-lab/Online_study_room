@@ -31,7 +31,6 @@ export async function render({ param, navigate }) {
           <div class="avatar avatar--lg" style="background:${me.avatarColor}">${esc(me.initial)}</div>
           <div>
             <div class="profile-head__name">${esc(me.name)}</div>
-            <div class="u-small u-weak">${esc(me.handle)}</div>
             <div class="u-small u-muted">${esc(joinSet([me.grade, me.targetSchool && `志望：${me.targetSchool}`]))}</div>
           </div>
           <a class="btn btn--ghost btn--sm profile-head__edit" href="#/profile/edit">${icon("edit", 16)}編集</a>
@@ -69,7 +68,7 @@ export async function render({ param, navigate }) {
       <section class="card">
         <h2 class="card__title">基本情報</h2>
         <div class="info-list">
-          ${infoRow("ログインID", me.loginId)}
+          ${infoRow("Google アカウント", me.email)}
           ${infoRow("性別", me.gender)}
           ${infoRow("生まれた年", me.birthYear && `${me.birthYear}年（${thisYear - me.birthYear}歳ごろ）`)}
           ${infoRow("都道府県", me.prefecture)}

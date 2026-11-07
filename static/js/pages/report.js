@@ -212,7 +212,7 @@ function renderMeTab(charts) {
             <div class="avatar" style="background:${me.avatarColor}">${esc(me.initial)}</div>
             <div>
               <div class="u-bold">${esc(me.name)}</div>
-              <div class="u-small u-weak">${esc([me.grade, me.prefecture].filter(Boolean).join("／") || me.handle)}</div>
+              <div class="u-small u-weak">${esc([me.grade, me.prefecture].filter(Boolean).join("／"))}</div>
             </div>
           </div>
           <a class="btn btn--ghost btn--sm" href="#/profile">${icon("user", 16)}プロフィール</a>

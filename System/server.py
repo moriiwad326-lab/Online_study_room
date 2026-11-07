@@ -3,8 +3,9 @@
 API（リクエスト・レスポンスとも JSON。エラーは {"error": メッセージ, "field": 項目名|null}）:
 
     GET    /api/auth/me              ログイン中のユーザー（未ログインなら 401）
-    POST   /api/auth/register        {loginId, password} → 登録してそのままログイン
-    POST   /api/auth/login           {loginId, password}
+    GET    /api/auth/google/start    Google の同意画面へリダイレクトする（JSON ではない）
+    GET    /api/auth/google/callback Google からの戻り先。セッションを発行して / へリダイレクトする。
+                                     失敗したら /#/login?error=<コード> へ（JSON ではない）
     POST   /api/auth/logout
     PUT    /api/me/profile           プロフィールを保存（初回設定・編集の両方）
 
@@ -20,14 +21,16 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
                                      公開すれば済むようにするため。ログイン中で、同じオリジンの
                                      ページからの接続だけ通す
 
-ユーザーは {id, loginId, profileCompleted, profile} の形で返す。
+ユーザーは {id, email, profileCompleted, profile} の形で返す。
 セッションは HttpOnly の Cookie で持つ。書き込み系は Content-Type: application/json を必須にして、
 SameSite=Lax と合わせて他サイトのフォームから勝手に送られないようにしている。
+Google からの戻りは他サイトからの遷移なので、state の Cookie も SameSite=Lax（Strict だと届かない）。
 """
 
 from __future__ import annotations
 
 import functools
+import hmac
 import http.server
 import json
 import re
@@ -36,13 +39,17 @@ import threading
 import urllib.parse
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-from .auth import AuthError, AuthStore
+from .auth import AuthError, AuthStore, NotInvitedError
 from .books import BookLookup, normalize_isbn
+from .google_oauth import FLOW_TTL_SEC, START_PATH, GoogleOAuth, OAuthFailure
 from .materials import MaterialStore, decode_image, sniff_image_type
 
 SESSION_COOKIE = "onsta_session"
+# ログイン途中のブラウザを見分ける Cookie（中身は state）。Google まわりのパスにだけ送らせる
+OAUTH_COOKIE = "onsta_oauth_state"
+OAUTH_COOKIE_PATH = "/api/auth/google"
 MAX_BODY_BYTES = 16 * 1024
 # 画像を data URL（base64 で 4/3 倍）で受け取るので、教材の追加だけ大きめに
 MAX_MATERIAL_BODY_BYTES = 3 * 1024 * 1024
@@ -56,14 +63,15 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     store: AuthStore
     materials: MaterialStore
     books: BookLookup
+    google: GoogleOAuth
     secure_cookie = False
     loc_upstream: Optional[Tuple[str, int]] = None  # 推論サーバーの (host, port)。None なら中継しない
 
     # (メソッド, パスの正規表現, メソッド名)。グループは数字なら int にして渡す
     ROUTES = [
         ("GET", r"/api/auth/me", "_me"),
-        ("POST", r"/api/auth/register", "_register"),
-        ("POST", r"/api/auth/login", "_login"),
+        ("GET", r"/api/auth/google/start", "_google_start"),
+        ("GET", r"/api/auth/google/callback", "_google_callback"),
         ("POST", r"/api/auth/logout", "_logout"),
         ("PUT", r"/api/me/profile", "_update_profile"),
         ("GET", r"/api/materials", "_list_materials"),
@@ -114,15 +122,44 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def _me(self) -> None:
         self._send_json(200, {"user": self._require_user()})
 
-    def _register(self) -> None:
-        body = self._read_json()
-        user = self.store.register(body.get("loginId"), body.get("password"))
-        self._send_json(201, {"user": user}, session=self.store.create_session(user["id"]))
+    def _google_start(self) -> None:
+        # 127.0.0.1 などで開かれていたら公開 URL に寄せる（Cookie は redirect_uri のホストに付ける必要がある）
+        public_host = urllib.parse.urlsplit(self.google.public_url).netloc
+        if self.headers.get("Host", "").lower() != public_host.lower():
+            self._redirect(self.google.public_url + START_PATH)
+            return
+        state, url = self.google.begin()
+        self._redirect(url, [self._cookie_header(OAUTH_COOKIE, state, FLOW_TTL_SEC, OAUTH_COOKIE_PATH)])
 
-    def _login(self) -> None:
-        body = self._read_json()
-        user = self.store.authenticate(body.get("loginId"), body.get("password"))
-        self._send_json(200, {"user": user}, session=self.store.create_session(user["id"]))
+    def _google_callback(self) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        state = query.get("state", [""])[0]
+        started = self._cookie(OAUTH_COOKIE) or ""
+        clear_state = self._cookie_header(OAUTH_COOKIE, "", 0, OAUTH_COOKIE_PATH)
+        try:
+            # ログインを始めたブラウザ自身への戻りか確かめる（他人のコードを踏ませる login CSRF を防ぐ）
+            if not started or not hmac.compare_digest(state.encode("utf-8"), started.encode("utf-8")):
+                raise OAuthFailure("expired")
+            identity = self.google.finish(state, query.get("code", [""])[0], query.get("error", [""])[0])
+            user = self.store.login_with_google(identity.sub, identity.email)
+        except OAuthFailure as err:
+            if err.detail:
+                self.log_message("Google ログインに失敗: %s", err.detail)
+            self._redirect(f"/#/login?error={err.code}", [clear_state])
+            return
+        except NotInvitedError:
+            self.log_message("招待されていない Google アカウントのログインを拒否しました")
+            self._redirect("/#/login?error=not_invited", [clear_state])
+            return
+        except AuthError as err:
+            self.log_message("Google ログインに失敗: %s", err.message)
+            self._redirect("/#/login?error=failed", [clear_state])
+            return
+
+        # ログイン前のセッションを引き継がない（セッション固定を防ぐ）
+        self.store.delete_session(self._session_token())
+        session = self.store.create_session(user["id"])
+        self._redirect("/", [clear_state, self._session_cookie_header(session)])
 
     def _logout(self) -> None:
         self._read_json()
@@ -230,13 +267,36 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
 
     # ---- 小道具 ----
 
-    def _session_token(self) -> Optional[str]:
+    def _cookie(self, name: str) -> Optional[str]:
         try:
             cookie = SimpleCookie(self.headers.get("Cookie", ""))
         except CookieError:
             return None
-        morsel = cookie.get(SESSION_COOKIE)
+        morsel = cookie.get(name)
         return morsel.value if morsel else None
+
+    def _session_token(self) -> Optional[str]:
+        return self._cookie(SESSION_COOKIE)
+
+    def _cookie_header(self, name: str, value: str, max_age: int, path: str = "/") -> str:
+        attrs = f"Path={path}; Max-Age={max_age}; HttpOnly; SameSite=Lax"
+        if self.secure_cookie:
+            attrs += "; Secure"
+        return f"{name}={value}; {attrs}"
+
+    def _session_cookie_header(self, session: str) -> str:
+        """session が "" なら Cookie を消す指定になる。"""
+        return self._cookie_header(SESSION_COOKIE, session, int(self.store.session_ttl) if session else 0)
+
+    def _redirect(self, location: str, cookies: Iterable[str] = ()) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        # 認可コード付きの URL をリファラで外に出さない
+        self.send_header("Referrer-Policy", "no-referrer")
+        for cookie in cookies:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
 
     def _require_user(self) -> Dict[str, Any]:
         user = self.store.user_for_session(self._session_token())
@@ -270,11 +330,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         if session is not None:
-            max_age = int(self.store.session_ttl) if session else 0
-            attrs = f"Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax"
-            if self.secure_cookie:
-                attrs += "; Secure"
-            self.send_header("Set-Cookie", f"{SESSION_COOKIE}={session}; {attrs}")
+            self.send_header("Set-Cookie", self._session_cookie_header(session))
         self.end_headers()
         self.wfile.write(data)
 
@@ -282,6 +338,10 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         # 開発中に JS を書き換えたとき古いものが使われないように（API の応答もキャッシュさせない）
         self.send_header("Cache-Control", getattr(self, "cache_control", "no-store"))
         super().end_headers()
+
+    def log_request(self, code="-", size="-"):
+        # クエリは記録しない（Google からの戻りには認可コードが入っている）
+        self.log_message('"%s %s" %s', self.command, self.path.split("?", 1)[0], code)
 
     def log_message(self, format, *args):  # noqa: A002 - 親クラスのシグネチャ
         if self.path.startswith(("/api/", "/loc")):
@@ -306,13 +366,14 @@ def _pipe(src: socket.socket, dst: socket.socket) -> None:
 
 
 def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
-                materials: MaterialStore, books: BookLookup,
+                materials: MaterialStore, books: BookLookup, google: GoogleOAuth,
                 secure_cookie: bool = False,
                 loc_upstream: Optional[Tuple[str, int]] = None) -> http.server.ThreadingHTTPServer:
     handler_cls = type("BoundAppHandler", (AppHandler,), {
         "store": store,
         "materials": materials,
         "books": books,
+        "google": google,
         "secure_cookie": secure_cookie,
         "loc_upstream": loc_upstream,
     })

@@ -31,7 +31,7 @@ let mock = null;
 /** localStorage の中身 */
 let local = { ...emptyLocal };
 
-/** ログイン中のユーザー { id, loginId, profileCompleted, profile }。未ログインなら null */
+/** ログイン中のユーザー { id, email, profileCompleted, profile }。未ログインなら null */
 let currentUser = null;
 /** 今のユーザーの localStorage キー（未ログインなら null で、保存しない） */
 let storageKey = null;
@@ -118,19 +118,6 @@ function minutesAgoToIso(minutesAgo) {
 export const getUser = () => currentUser;
 export const isAuthAvailable = () => authAvailable;
 
-export async function login(loginId, password) {
-  const { user } = await api("POST", "/api/auth/login", { loginId, password });
-  await setUser(user);
-  return user;
-}
-
-/** 新規登録（成功するとそのままログイン状態になる） */
-export async function register(loginId, password) {
-  const { user } = await api("POST", "/api/auth/register", { loginId, password });
-  await setUser(user);
-  return user;
-}
-
 export async function logout() {
   try {
     await api("POST", "/api/auth/logout", {});
@@ -205,16 +192,16 @@ function toMaterial(m) {
 
 /**
  * 画面に出す「自分」。プロフィールの未設定項目は空にそろえて返す。
- * name はニックネーム（未設定ならログインID）、initial はその1文字目。
+ * name はニックネーム、initial はその1文字目。
+ * email はログインした Google アカウントで、本人にだけ見せる（name の代わりに使わない）。
  */
 export function getMe() {
   const p = currentUser?.profile || {};
-  const name = p.nickname || currentUser?.loginId || "ゲスト";
+  const name = p.nickname || "ゲスト";
   return {
     id: currentUser ? `u${currentUser.id}` : "guest",
-    loginId: currentUser?.loginId || "",
+    email: currentUser?.email || "",
     name,
-    handle: currentUser ? `@${currentUser.loginId}` : "",
     initial: Array.from(name)[0] || "?",
     avatarColor: p.avatarColor || DEFAULT_AVATAR_COLOR,
     bio: p.bio || "",

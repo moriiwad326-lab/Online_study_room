@@ -22,7 +22,6 @@ import * as reportPage from "./pages/report.js";
 import * as searchPage from "./pages/search.js";
 import * as profilePage from "./pages/profile.js";
 import * as loginPage from "./pages/login.js";
-import * as signupPage from "./pages/signup.js";
 import * as setupPage from "./pages/setup.js";
 
 /** ルート名 → ページモジュールの対応表 */
@@ -37,7 +36,6 @@ const routes = {
 /** サイドバー・ヘッダーを出さない全画面のページ */
 const authRoutes = {
   login: loginPage,
-  signup: signupPage,
   setup: setupPage,
 };
 
@@ -56,7 +54,7 @@ let currentDestroy = null;
 /* ============ ハッシュの解析 ============ */
 
 /**
- * "#/report/xyz?tab=me" を { route:"report", param:"xyz", tab:"me" } にする
+ * "#/report/xyz?tab=me" を { route:"report", param:"xyz", tab:"me", query } にする
  */
 function parseHash() {
   const raw = location.hash.replace(/^#/, "") || "/timeline";
@@ -68,6 +66,7 @@ function parseHash() {
     route: segments[0] || "timeline",
     param: segments[1] || null,
     tab: query.get("tab"),
+    query,
   };
 }
 
@@ -162,13 +161,13 @@ function renderHeader(page, ctx) {
 
 /**
  * ログイン状態に合わない画面なら、行くべき画面のハッシュを返す（そのままでよければ null）
- *  - 未ログイン               → ログイン画面（新規登録画面は可）
+ *  - 未ログイン               → ログイン画面
  *  - ログイン済み・初回設定前 → 初回設定画面
- *  - ログイン済み・設定済み   → ログイン・新規登録・初回設定の画面には行かせない
+ *  - ログイン済み・設定済み   → ログイン・初回設定の画面には行かせない
  */
 function redirectFor(route) {
   const user = store.getUser();
-  if (!user) return route === "login" || route === "signup" ? null : "#/login";
+  if (!user) return route === "login" ? null : "#/login";
   if (!user.profileCompleted) return route === "setup" ? null : "#/setup";
   return authRoutes[route] ? "#/timeline" : null;
 }

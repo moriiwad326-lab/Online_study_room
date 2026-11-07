@@ -4,17 +4,14 @@ import asyncio
 import json
 import socket
 import threading
-import urllib.request
-from http.cookiejar import CookieJar
 
 import pytest
 
 from System.auth import AuthStore
 from System.books import BookLookup
 from System.materials import MaterialStore
-from System.server import make_server
-
-FAST = 1_000
+from System.server import SESSION_COOKIE, make_server
+from System.tests.helpers import create_user, dummy_google
 
 
 def free_port() -> int:
@@ -56,23 +53,17 @@ def app(tmp_path, upstream_port):
     static = tmp_path / "static"
     static.mkdir()
     db = tmp_path / "t.db"
-    httpd = make_server("127.0.0.1", 0, static, AuthStore(db, iterations=FAST),
-                        MaterialStore(db), BookLookup(),
+    auth = AuthStore(db)
+    httpd = make_server("127.0.0.1", 0, static, auth, MaterialStore(db), BookLookup(), dummy_google(),
                         loc_upstream=("127.0.0.1", upstream_port))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"127.0.0.1:{httpd.server_address[1]}"
+    yield f"127.0.0.1:{httpd.server_address[1]}", login_cookie(auth)
     httpd.shutdown()
     httpd.server_close()
 
 
-def login_cookie(host: str) -> str:
-    jar = CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    req = urllib.request.Request(f"http://{host}/api/auth/register", method="POST",
-                                 data=json.dumps({"loginId": "taro", "password": "secret123"}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    opener.open(req).close()
-    return "; ".join(f"{c.name}={c.value}" for c in jar)
+def login_cookie(auth: AuthStore) -> str:
+    return f"{SESSION_COOKIE}={auth.create_session(create_user(auth, 'taro')['id'])}"
 
 
 def connect(host: str, **kwargs):
@@ -96,8 +87,8 @@ def handshake_status(host: str, origin: str, cookie: str = "") -> int:
 
 
 def test_proxy_relays_messages_both_ways(app):
-    cookie = login_cookie(app)
-    with connect(app, origin=f"http://{app}", additional_headers={"Cookie": cookie}) as ws:
+    host, cookie = app
+    with connect(host, origin=f"http://{host}", additional_headers={"Cookie": cookie}) as ws:
         hello = json.loads(ws.recv(timeout=5))
         assert hello["path"] == "/loc"
         assert "cookie" not in hello["headers"]  # セッションは推論サーバーに渡さない
@@ -107,12 +98,13 @@ def test_proxy_relays_messages_both_ways(app):
 
 
 def test_proxy_requires_login(app):
-    assert handshake_status(app, f"http://{app}") == 401
+    host, _ = app
+    assert handshake_status(host, f"http://{host}") == 401
 
 
 def test_proxy_rejects_other_origin(app):
-    cookie = login_cookie(app)
-    status = handshake_status(app, "https://evil.example", cookie)
+    host, cookie = app
+    status = handshake_status(host, "https://evil.example", cookie)
     assert status == 403
 
 
@@ -121,13 +113,13 @@ def test_proxy_reports_missing_upstream(tmp_path):
     static = tmp_path / "static"
     static.mkdir()
     db = tmp_path / "t.db"
-    httpd = make_server("127.0.0.1", 0, static, AuthStore(db, iterations=FAST),
-                        MaterialStore(db), BookLookup(), loc_upstream=("127.0.0.1", free_port()))
+    auth = AuthStore(db)
+    httpd = make_server("127.0.0.1", 0, static, auth, MaterialStore(db), BookLookup(), dummy_google(),
+                        loc_upstream=("127.0.0.1", free_port()))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     host = f"127.0.0.1:{httpd.server_address[1]}"
     try:
-        cookie = login_cookie(host)
-        assert handshake_status(host, f"http://{host}", cookie) == 502
+        assert handshake_status(host, f"http://{host}", login_cookie(auth)) == 502
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -12,7 +12,7 @@ Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 - バーコード読み取りに、ブラウザに BarcodeDetector が無いとき（Windows の Chrome など）だけ
   [ZXing](https://github.com/zxing-js/browser) を CDN から読み込む（読み取りを始めたときに初めて読み込む）
 - ハッシュベースの SPA（`#/timeline` など）
-- ログインは `../main.py`（`../System/`）の API。ユーザーは SQLite に保存
+- ログインは Google アカウントのみで、新規登録は招待制（`../main.py`・`../System/` の API）。ユーザーは SQLite に保存
 - それ以外のデータはモック JSON ＋ `localStorage`
 
 ---
@@ -22,6 +22,61 @@ Onsta の特徴は、勉強中の手の動きをカメラでとらえて
 カメラ（`getUserMedia`）はセキュアなオリジンでしか使えないため、
 **ファイルを直接開くのではなく `localhost` で動かしてください。**
 
+### はじめに：Google ログインの設定（最初の1回）
+
+ログインは Google アカウントだけです。先に Google Cloud で OAuth クライアントを作ります。
+
+1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作り、OAuth 同意画面を設定する。
+   スコープは `openid` と `.../auth/userinfo.email` だけで足ります
+2. 「認証情報」→「OAuth クライアント ID を作成」→ 種類は **ウェブ アプリケーション**
+3. 「承認済みのリダイレクト URI」に次を追加する（`main.py` も起動時に表示します）
+
+   ```
+   http://localhost:8000/api/auth/google/callback
+   ```
+
+4. 表示されたクライアント ID とシークレットを環境変数に入れる（シークレットはコミットしない）
+
+   ```powershell
+   $env:GOOGLE_CLIENT_ID = "xxxx.apps.googleusercontent.com"
+   $env:GOOGLE_CLIENT_SECRET = "GOCSPX-xxxx"
+   ```
+
+> 同意画面の公開ステータスが「テスト」の間は、Google Cloud 側のテストユーザーに追加した人だけがログインできます。
+> Onsta の招待とは別なので、「テスト」のまま使うなら両方に追加してください。
+
+### 招待（新規登録を許す人を決める）
+
+新規登録は招待制です。招待されたメールアドレスの Google アカウントだけが、はじめてのログインで登録されます。
+招待はサーバー上のコマンドでだけ操作でき、Web の画面や API からは変更できません。
+
+```powershell
+python -m System.admin invite someone@gmail.com   # 招待する（1回使うと消える）
+python -m System.admin uninvite someone@gmail.com # 未使用の招待を取り消す
+python -m System.admin list                       # 招待とユーザーの一覧
+```
+
+メールアドレスは Google アカウントのものと完全に一致させてください（大文字・小文字は区別しません。
+Gmail のドットの有無は別のアドレスとして扱います）。一度登録した人は、招待が消えたあとも
+Google アカウントの ID（sub）で本人確認してログインできます。
+
+### パスワード認証だった頃のアカウント
+
+以前のログインID＋パスワードは廃止しました。古い DB は次の起動時（`main.py` か `System.admin` の実行時）に
+自動で移行され、**パスワードハッシュと全セッションが削除されます**（元に戻せません）。教材・プロフィールは
+ユーザー ID とともに残りますが、Google アカウントと結び付けるまでログインできません。
+
+```powershell
+python -m System.admin list                                # 旧アカウントの ID を確認する
+python -m System.admin invite someone@gmail.com --user 2   # ID 2 の旧アカウントに結び付ける
+```
+
+指定したメールアドレスの人が次にログインすると、そのアカウントに入れます。ログインIDはメール確認をしていなかったので、
+ログインIDとメールアドレスが同じ文字列でも自動では結び付けません（他人のアドレスをIDにして作られたアカウントに
+本人が入ってしまうのを防ぐため）。**結び付ける相手が本人であることは管理者が確かめてください。**
+
+### 起動
+
 **アプリサーバー**（フロントの配信＋ログイン API）を起動します。ログインに必要なので必ず起動してください。
 
 ```powershell
@@ -29,7 +84,7 @@ cd C:\Users\morii\develop\Online_Study_Room
 python main.py
 ```
 
-ブラウザで <http://localhost:8000/> を開き、「新規登録」からアカウントを作ります。
+ブラウザで <http://localhost:8000/> を開き、「Google でログイン」を押します。
 ユーザー情報は `System/data/onsta.db`（git 管理外）に保存されます。
 
 **学習済みモデルで LoC も出す場合**は、もう1つのターミナルで推論サーバーを
@@ -45,7 +100,7 @@ LoC\.venv\Scripts\python.exe LoC\server.py --no-static
 推論サーバーを起動していなければ、接続に失敗して自動でモックの LoC に切り替わります。
 
 > `index.html` をダブルクリックで開いたり、`python -m http.server` で配信したりすると
-> ログイン API が無いため、ログイン画面に「サーバーに接続できません」と表示されます。
+> ログイン API が無いため、ログイン画面に「ログイン用のサーバーに接続できません」と表示されます。
 > 必ず `python main.py` 越しに開いてください。
 
 停止するときは `Ctrl + C` です。
@@ -55,19 +110,23 @@ LoC\.venv\Scripts\python.exe LoC\server.py --no-static
 カメラは HTTPS でないと使えないので、[ngrok](https://ngrok.com/) で 8000 番を HTTPS 公開します
 （初回だけ `ngrok config add-authtoken <トークン>` が必要）。
 
+Google ログインの戻り先は事前登録が必要なので、URL が変わらない ngrok の固定ドメインを使い、
+Google Cloud の「承認済みのリダイレクト URI」に `https://xxxx.ngrok-free.dev/api/auth/google/callback` も追加します。
+
 ```powershell
-# ターミナル1：アプリサーバー（HTTPS 越しなので Cookie に Secure を付ける）
-.\.venv\Scripts\python.exe main.py --secure-cookie
+# ターミナル1：アプリサーバー（https の公開 URL を渡すと Cookie に Secure も付く）
+.\.venv\Scripts\python.exe main.py --public-url https://xxxx.ngrok-free.dev
 
 # ターミナル2：推論サーバー（LoC を出す場合）
 .\.venv\Scripts\python.exe LoC\server.py --no-static
 
 # ターミナル3：公開
-ngrok http 8000
+ngrok http 8000 --url xxxx.ngrok-free.dev
 ```
 
-表示された `https://xxxx.ngrok-free.dev` などの URL を端末のブラウザで開きます
+`https://xxxx.ngrok-free.dev` を端末のブラウザで開きます
 （無料プランでは最初に ngrok の確認画面が出るので「Visit Site」を押す）。
+`--public-url` と違う URL で開いたときは、ログインの開始時に公開 URL へ移動します。
 
 - 公開するのは 8000 番だけです。LoC は `wss://<そのURL>/loc` に接続し、`main.py` が推論サーバー（`localhost:8765`）へ中継します。
   中継はログイン中かつ同じオリジンのページからの接続だけ通します
@@ -80,8 +139,7 @@ ngrok http 8000
 
 | ルート | 画面 | 内容 |
 | --- | --- | --- |
-| `#/login` | ログイン | ログインID＋パスワード。未ログインで他の画面を開くとここへ移動 |
-| `#/signup` | 新規登録 | ログインID（半角英数字と `_ . - @` の4〜64文字。メールアドレスも可）＋パスワード（8文字以上・英字と数字を含む） |
+| `#/login` | ログイン | 「Google でログイン」のみ。招待されたアカウントは初回ログインで登録される。未ログインで他の画面を開くとここへ移動 |
 | `#/setup` | マイページの設定 | 初回ログイン時（プロフィール未保存）だけ表示。ニックネームのみ必須、他は任意 |
 | `#/timeline` | タイムライン | 「いま勉強中」のライブ表示（LoC＋継続時間）、投稿カード（平均LoC＋スパークライン）。タブ：フォロー／目標 |
 | `#/record` | 記録する | カテゴリごとの自分の教材一覧（最初は空で追加の案内）、教材を追加、右下に新規記録ボタン |
@@ -116,7 +174,7 @@ static/
     icons.js              アイコン（すべてインラインSVGで自作）
     pages/
       timeline.js  record.js  report.js  search.js  profile.js
-      login.js  signup.js  setup.js  profileForm.js（初回設定と編集で共用）
+      login.js  setup.js  profileForm.js（初回設定と編集で共用）
       materialAdd.js（教材の追加。record.js から呼ぶ）
   data/
     mock.json             モックデータ（他ユーザーの投稿とその教材・記事など）
@@ -127,7 +185,7 @@ static/
 ### データの持ち方
 
 - `data/mock.json` … 他ユーザーの投稿とその教材、記事など「サーバーから来るはずのもの」
-- アプリサーバー（`System/data/onsta.db`）… アカウント、ログインセッション、プロフィール、自分のカテゴリと教材（画像も）
+- アプリサーバー（`System/data/onsta.db`）… アカウント（Google の ID とメールアドレス）、招待、ログインセッション、プロフィール、自分のカテゴリと教材（画像も）
 - `localStorage`（キー `onsta.v1.u<ユーザーID>`）… 自分の学習記録といいね（ユーザーごと）
 
 新しいユーザーは教材も学習記録も空から始まります（以前の版で入れていたサンプル学習記録は読み込み時に取り除きます）。
@@ -137,31 +195,42 @@ static/
 
 ## アプリ API の仕様
 
-実装は `../System/server.py`（HTTP）、`../System/auth.py`（アカウント）、`../System/materials.py`（教材）、
-`../System/books.py`（書誌検索）。リクエスト・レスポンスとも JSON です。
+実装は `../System/server.py`（HTTP）、`../System/auth.py`（アカウント・招待）、
+`../System/google_oauth.py`（Google ログイン）、`../System/admin.py`（招待の CLI）、`../System/materials.py`（教材）、
+`../System/books.py`（書誌検索）。リダイレクトするものを除き、リクエスト・レスポンスとも JSON です。
 
 ### ログイン
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | `GET` | `/api/auth/me` | ログイン中のユーザー。未ログインなら 401 |
-| `POST` | `/api/auth/register` | `{loginId, password}` で登録し、そのままログイン |
-| `POST` | `/api/auth/login` | `{loginId, password}` でログイン |
-| `POST` | `/api/auth/logout` | ログアウト |
+| `GET` | `/api/auth/google/start` | Google の同意画面へリダイレクトする |
+| `GET` | `/api/auth/google/callback` | Google からの戻り先。成功すると `/` へ、失敗すると `/#/login?error=<コード>` へリダイレクトする |
+| `POST` | `/api/auth/logout` | ログアウト（Google 自体からはログアウトしない） |
 | `PUT` | `/api/me/profile` | `{profile}` を保存（初回設定・編集とも）。保存すると `profileCompleted` が true になる |
 
-- ユーザーは `{ id, loginId, profileCompleted, profile }` の形で返る
-- エラーは `{ "error": "画面に出せるメッセージ", "field": "loginId" など | null }`
+- ユーザーは `{ id, email, profileCompleted, profile }` の形で返る。`email` は本人にだけ見せる
+- エラーは `{ "error": "画面に出せるメッセージ", "field": "nickname" など | null }`
+- `error` のコード：`cancelled`（同意画面でキャンセル）／`expired`（期限切れ・別のブラウザからの戻り）／
+  `unverified`（メール未確認の Google アカウント）／`not_invited`（招待なし）／`failed`（その他。詳細はサーバーのログ）
 - `profile` の項目：`nickname`（必須・20文字）、`avatarColor`、`bio`、`tags`（10個まで）、`grade`、
   `targetSchool`、`examName`、`examDate`（`YYYY-MM-DD`）、`weeklyGoalMinutes`、`gender`、`birthYear`、`prefecture`
 
 セキュリティまわり：
 
-- パスワードは PBKDF2-HMAC-SHA256（60万回・ソルト付き）でハッシュ化して保存
-- セッションは `HttpOnly; SameSite=Lax` の Cookie（30日）。DB にはトークンの SHA-256 だけを保存
+- パスワードは持たない。本人確認は Google に任せ、OpenID Connect の認可コードフロー（PKCE・state・nonce つき）を
+  サーバー側で行う。要求するスコープは `openid email` だけで、アクセストークンは保存しない
+- state は1回限り（10分で失効）で、ログインを始めたブラウザの Cookie とも照合する（他人のコードを踏ませる攻撃を防ぐ）
+- ID トークンは iss・aud・exp・nonce・`email_verified` を検証する。署名の検証は、TLS 越しにトークンエンドポイントから
+  直接受け取るので省略している（OpenID Connect Core 3.1.3.7）
+- 本人の識別はメールアドレスではなく Google の `sub` で行う（メールアドレスは変わったり再利用されたりする）
+- 招待は1回使うと消える。招待の操作は CLI からだけで、Web に管理用の API は無い
+- セッションは `HttpOnly; SameSite=Lax` の Cookie（30日）。DB にはトークンの SHA-256 だけを保存。ログインのたびに作り直す
 - 書き込み系は `Content-Type: application/json` 必須（他サイトのフォームから送らせない）
-- 同じログインIDで5回続けて失敗すると15分ログインできない
-- HTTPS で公開するときは `python main.py --secure-cookie` で Cookie に `Secure` を付ける
+- 公開 URL が `https` なら Cookie に `Secure` を付ける（`--public-url` か環境変数 `ONSTA_PUBLIC_URL`）。
+  `localhost` 以外の `http` では起動しない
+- サーバーのログには URL のクエリを残さない（認可コードが入るため）
+- クライアントシークレットは環境変数でだけ受け取る（コマンド履歴に残さない）
 
 ### 教材
 

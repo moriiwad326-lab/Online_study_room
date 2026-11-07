@@ -655,7 +655,7 @@
 }
 .link-btn:hover { text-decoration: underline; }
 
-/* ---------------- ログイン・新規登録・初回設定 ---------------- */
+/* ---------------- ログイン・初回設定 ---------------- */
 .auth {
   min-height: 100vh;
   display: grid;
@@ -669,7 +669,6 @@
 .auth__title { font-size: 19px; font-weight: 800; margin-bottom: 16px; }
 .auth__welcome { margin-bottom: 16px; }
 .auth__welcome .auth__title { margin-bottom: 6px; }
-.auth__submit { margin-top: 6px; }
 .auth__card .notice--error { margin-bottom: 12px; }
 .auth__switch {
   margin-top: 16px;
@@ -677,8 +676,23 @@
   font-size: 13px;
   color: var(--c-text-sub);
 }
-.auth__switch a { color: var(--c-primary); font-weight: 700; }
-.auth__switch a:hover { text-decoration: underline; }
+/* Google のブランドガイドラインに沿ったボタン（白地・グレーの枠・公式ロゴ） */
+.btn-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid #747775;
+  border-radius: var(--radius);
+  background: #fff;
+  color: #1f1f1f;
+  font-weight: 600;
+  transition: background .15s;
+}
+.btn-google:hover { background: #f2f2f2; }
 
 /* ---------------- プロフィールの入力フォーム ---------------- */
 .profile-form .notice--error { margin-top: 12px; }

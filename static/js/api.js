@@ -10,7 +10,7 @@ export class ApiError extends Error {
   /**
    * @param {number} status  HTTP ステータス（サーバーに届かなかったときは 0）
    * @param {string} message 画面に出すメッセージ
-   * @param {string|null} field 入力エラーのときの項目名（loginId など）
+   * @param {string|null} field 入力エラーのときの項目名（nickname など）
    */
   constructor(status, message, field = null) {
     super(message);
