@@ -103,6 +103,7 @@ def train(
     epochs: int = 50,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
+    weight_decay: float = 1e-4,
     val_ratio: float = 0.2,
     dropout: float = 0.2,
     checkpoint_path: Optional[str | Path] = DEFAULT_CHECKPOINT,
@@ -153,7 +154,7 @@ def train(
     model = build_model(dropout=dropout).to(torch_device)
     # Huber損失: 自動ラベルのノイズ（外れ値）に引っ張られにくくする
     criterion = nn.SmoothL1Loss(beta=HUBER_BETA)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
@@ -187,6 +188,7 @@ def train(
                         "model_state_dict": model.state_dict(),
                         "seq_len": seq_len,
                         "dropout": dropout,
+                        "weight_decay": weight_decay,
                         "split": split,
                         "label_smooth": label_smooth,
                         "epoch": epoch,
@@ -241,6 +243,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4,
+                        help="Adam の weight_decay（0で無効）")
     parser.add_argument("--val-ratio", type=float, default=0.2,
                         help="train の中から検証（ベストエポックの選択）に回す割合（0で検証なし）")
     parser.add_argument("--split", choices=("video", "tail"), default="video",
@@ -261,6 +265,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        weight_decay=args.weight_decay,
         val_ratio=args.val_ratio,
         dropout=args.dropout,
         checkpoint_path=args.checkpoint,
