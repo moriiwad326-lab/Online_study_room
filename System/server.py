@@ -22,6 +22,10 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     DELETE /api/records              自分の学習記録をすべて消す
     GET    /api/timeline             自分とフォロー中の人の学習記録 {records}
 
+    GET    /api/live                 自分とフォロー中の人の、いま続いている LoC 計測 {sessions}
+    PUT    /api/live                 {materialId, status, elapsedSec, loc, recent} 計測中の今の状態（約5秒ごと）
+    DELETE /api/live                 計測を終えた（画面を離れた）
+
     GET    /api/users?q=<文字>        ニックネームでユーザーを探す {users}
     GET    /api/users/<id>           公開プロフィール＋フォロー数＋自分との関係 {user}
     GET    /api/users/<id>/records   その人の学習記録 {records}
@@ -79,6 +83,7 @@ from .auth import AuthError, AuthStore, NotInvitedError
 from .books import BookLookup, normalize_isbn
 from .google_oauth import FLOW_TTL_SEC, START_PATH, GoogleOAuth, OAuthFailure
 from .invites import TICKET_TTL_SEC, InviteRequestStore
+from .live import LiveStore
 from .materials import MaterialStore, decode_image, sniff_image_type
 from .records import USER_RECORDS_LIMIT, RecordStore
 from .social import SocialStore
@@ -109,6 +114,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     social: SocialStore
     records: RecordStore
     invites: InviteRequestStore
+    live: LiveStore
     secure_cookie = False
     loc_upstream: Optional[Tuple[str, int]] = None  # 推論サーバーの (host, port)。None なら中継しない
 
@@ -130,6 +136,9 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("POST", r"/api/records/import", "_import_records"),
         ("DELETE", r"/api/records", "_delete_records"),
         ("GET", r"/api/timeline", "_timeline"),
+        ("GET", r"/api/live", "_list_live"),
+        ("PUT", r"/api/live", "_update_live"),
+        ("DELETE", r"/api/live", "_end_live"),
         ("GET", r"/api/users", "_search_users"),
         ("GET", r"/api/users/(\d+)", "_get_user"),
         ("GET", r"/api/users/(\d+)/records", "_user_records"),
@@ -323,6 +332,22 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def _timeline(self) -> None:
         user = self._require_user()
         self._send_json(200, {"records": self.records.timeline(user["id"])})
+
+    # ---- いま勉強中 ----
+
+    def _list_live(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"sessions": self.live.list_for(user["id"])})
+
+    def _update_live(self) -> None:
+        user = self._require_user()
+        self.live.update(user["id"], self._read_json())
+        self._send_json(200, {"ok": True})
+
+    def _end_live(self) -> None:
+        user = self._require_user()
+        self.live.end(user["id"])
+        self._send_json(200, {"ok": True})
 
     # ---- ユーザー・フォロー ----
 
@@ -588,8 +613,9 @@ def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
                 loc_upstream: Optional[Tuple[str, int]] = None,
                 social: Optional[SocialStore] = None,
                 records: Optional[RecordStore] = None,
-                invites: Optional[InviteRequestStore] = None) -> http.server.ThreadingHTTPServer:
-    """social / records / invites を省略すると、store と同じ DB ファイルで作る。"""
+                invites: Optional[InviteRequestStore] = None,
+                live: Optional[LiveStore] = None) -> http.server.ThreadingHTTPServer:
+    """social / records / invites / live を省略すると、store と同じ DB ファイルで作る。"""
     handler_cls = type("BoundAppHandler", (AppHandler,), {
         "store": store,
         "materials": materials,
@@ -598,6 +624,7 @@ def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
         "social": social or SocialStore(store.db_path),
         "records": records or RecordStore(store.db_path),
         "invites": invites or InviteRequestStore(store.db_path),
+        "live": live or LiveStore(store.db_path),
         "secure_cookie": secure_cookie,
         "loc_upstream": loc_upstream,
     })

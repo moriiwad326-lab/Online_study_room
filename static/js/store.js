@@ -366,15 +366,6 @@ export function getMaterialsBySubject() {
     .filter((group) => group.materials.length > 0);
 }
 
-/** 「いま勉強中」のユーザー一覧。elapsedSec の起点を実時刻に直して返す */
-export function getLiveUsers() {
-  return mock.liveUsers.map((u) => ({
-    ...u,
-    material: getMaterial(u.materialId),
-    startedAt: Date.now() - u.elapsedSec * 1000,
-  }));
-}
-
 /** 目標タブの投稿 */
 export function getGoalPosts() {
   return mock.goalPosts.map((g) => ({ ...g, createdAt: minutesAgoToIso(g.minutesAgo) }));
@@ -415,6 +406,36 @@ export async function getTimelinePosts() {
 export async function getUserPosts(userId) {
   const { records } = await api("GET", `/api/users/${userId}/records`);
   return records.map(toPost);
+}
+
+/* ============ いま勉強中 ============ */
+
+/**
+ * 自分とフォロー中の人の、いま続いている LoC 計測。
+ * 各要素：{ user(person), material{title,categoryName,color}, status("warmup"|"studying"|"paused"),
+ *          elapsedSec, loc(null はモック計測などで LoC なし), recent[], secondsSinceUpdate, isMine }
+ */
+export async function getLiveSessions() {
+  const { sessions } = await api("GET", "/api/live");
+  return sessions.map((s) => ({
+    ...s,
+    user: toPerson(s.user),
+    material: { ...s.material, color: s.material.color || UNKNOWN_COLOR },
+    isMine: s.user.id === currentUser?.id,
+  }));
+}
+
+/** 計測中の今の状態を送る（計測画面から約5秒ごと）。フォロワーのタイムラインに出る */
+export async function updateLive(state) {
+  await api("PUT", "/api/live", state);
+}
+
+/**
+ * 計測の終わりを知らせる。ページを閉じる途中でも届くよう keepalive で送り、失敗しても気にしない
+ * （届かなくても、更新が止まった計測はサーバーが30秒で終わったものとみなす）。
+ */
+export function endLive() {
+  fetch("/api/live", { method: "DELETE", credentials: "same-origin", keepalive: true }).catch(() => {});
 }
 
 /* ============ 更新系 ============ */

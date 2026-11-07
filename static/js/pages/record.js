@@ -22,6 +22,8 @@ const LOW_LOC = 15;              // これを下回ると「集中していな�
 const LOW_LIMIT_SEC = 5 * 60;    // その状態がこれだけ続いたら一時停止する
 const ZERO_LIMIT_SEC = 60;       // LoC が 0（席を離れているなど）のままこれだけ続いたら一時停止する
 const RESUME_LOC = 30;           // 一時停止後、これより上に戻ったら 0 から数え直す
+const LIVE_INTERVAL_MS = 5000;   // フォロワーの「いま勉強中」に今の状態を送る間隔（LoC も約5秒ごとに届く）
+const LIVE_RECENT_MAX = 60;      // 「いま勉強中」に見せる直近の LoC の点数（5秒ごとで5分ぶん）
 
 /*
  * 使うカメラ。最後に選んだものを覚えておく。
@@ -369,6 +371,10 @@ function renderMeasure(ctx) {
     client: null,       // LocClient
     chart: null,        // リアルタイム折れ線
     timer: null,        // 1秒ごとのタイマー
+    locStatus: null,    // LocClient の接続状態（LOC_STATUS）
+    liveLoc: null,      // 推論サーバーから受け取った直近の LoC（モックの値は入れない）
+    liveRecent: [],     // フォロワーに見せる直近の LoC（推論サーバーの値だけ。最大 LIVE_RECENT_MAX 点）
+    liveTimer: null,    // 「いま勉強中」を送るタイマー
   };
 
   /* ---- 要素の取り出し ---- */
@@ -493,6 +499,13 @@ function renderMeasure(ctx) {
         locNum.textContent = v;
         locNum.className = `stage__loc-num loc-color tabular ${locLevelClass(v)}`;
         state.chart.push(v, formatClock(state.totalSec));
+
+        // フォロワーには推論サーバーの本物の LoC だけを見せる（モックの値は送らない）
+        if (state.locStatus === LOC_STATUS.LIVE) {
+          state.liveLoc = v;
+          state.liveRecent.push(v);
+          if (state.liveRecent.length > LIVE_RECENT_MAX) state.liveRecent.shift();
+        }
       },
       onStatus: (status, detail) => updateStatus(status, detail),
       // 推論サーバーは直近の映像が一定量たまるまで LoC を出せないので、その間の進み具合を出す
@@ -503,6 +516,11 @@ function renderMeasure(ctx) {
       },
     });
     state.client.start({ video });
+
+    // フォロワーのタイムラインの「いま勉強中」に、今の状態を送り続ける
+    sendLive();
+    state.liveTimer = setInterval(sendLive, LIVE_INTERVAL_MS);
+    window.addEventListener("pagehide", store.endLive);
 
     // 5) 経過時間のカウント
     state.timer = setInterval(() => {
@@ -539,6 +557,22 @@ function renderMeasure(ctx) {
     }
     autoPausedEl.classList.toggle("u-hidden", !on);
     renderTimers();
+  }
+
+  /** 「いま勉強中」に出す今の状態を送る（失敗しても計測は続ける） */
+  function sendLive() {
+    if (!state.running) return;
+    const usingMock = state.locStatus === LOC_STATUS.MOCK || state.locStatus === LOC_STATUS.ERROR;
+    let status = "studying";
+    if (state.paused || state.autoPaused) status = "paused";
+    else if (!usingMock && state.liveLoc === null) status = "warmup";
+    store.updateLive({
+      materialId: Number(material.id),
+      status,
+      elapsedSec: state.elapsedSec,
+      loc: usingMock ? null : state.liveLoc,
+      recent: usingMock ? [] : state.liveRecent,
+    }).catch((err) => console.warn("[record] いま勉強中の状態を送れませんでした", err));
   }
 
   function renderTimers() {
@@ -669,6 +703,7 @@ function renderMeasure(ctx) {
   /* ---- 表示の更新まわり ---- */
 
   function updateStatus(status, detail) {
+    state.locStatus = status;
     statusEl.textContent = statusLabel(status);
     statusEl.className = "status";
     if (status === LOC_STATUS.LIVE) statusEl.classList.add("status--live");
@@ -717,8 +752,11 @@ function renderMeasure(ctx) {
 
   /** タイマー・カメラ・WebSocket をすべて止める */
   function cleanup() {
+    if (state.running) store.endLive();
     state.running = false;
     clearInterval(state.timer);
+    clearInterval(state.liveTimer);
+    window.removeEventListener("pagehide", store.endLive);
     state.client?.stop();
     state.chart?.destroy();
     state.stream?.getTracks().forEach((track) => track.stop());

@@ -1,15 +1,22 @@
 /**
  * pages/timeline.js : タイムライン（#/timeline）
  *
- *  - 「いま勉強中」のユーザーを横並びで表示し、LoC と継続時間を1秒ごとに更新する
+ *  - 「いま勉強中」：自分とフォロー中の人のうち LoC を計測中の人を横並びで出す。
+ *    LIVE_POLL_MS ごとにサーバーへ聞き直して LoC・直近の推移を更新し、継続時間は1秒ごとに進める
  *  - 自分とフォロー中の人の学習記録を投稿カードとして並べ、平均LoC とスパークラインを添える
  *    （投稿カードは user.js のユーザーページでも使う）
  */
 
-import { el, esc, formatRelative, formatDuration, formatClock, clampLoc, locLevelClass, thumbHtml } from "../utils.js";
+import { el, esc, formatRelative, formatDuration, formatClock, locLevelClass, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import { gaugeHtml, updateGauge, drawSparkline } from "../charts.js";
 import * as store from "../store.js";
+
+/** 「いま勉強中」をサーバーに聞き直す間隔（ms）。計測画面が送ってくるのも約5秒ごと */
+const LIVE_POLL_MS = 5000;
+
+/** 計測の状態の表示（LoC の数字の代わりに出す） */
+const LIVE_STATUS_LABEL = { warmup: "準備中", paused: "一時停止中" };
 
 export const meta = {
   title: "タイムライン",
@@ -26,14 +33,12 @@ export async function render(ctx) {
   if (ctx.tab === "goal") {
     node.appendChild(renderGoalTab());
   } else {
-    // --- いま勉強中 ---
-    // 誰も勉強していないときはセクションごと出さない
-    const liveUsers = store.getLiveUsers();
-    if (liveUsers.length > 0) {
-      const liveSection = renderLiveSection(liveUsers);
-      node.appendChild(liveSection);
-      timers.push(startLiveTicker(liveSection, liveUsers));
-    }
+    // --- いま勉強中（誰も計測していないときはセクションごと隠す） ---
+    const live = createLiveSection();
+    node.appendChild(live.section);
+    await live.refresh();
+    timers.push(setInterval(live.refresh, LIVE_POLL_MS));
+    timers.push(setInterval(live.tick, 1000));
 
     // --- 投稿一覧（自分＋フォロー中の人） ---
     const posts = await store.getTimelinePosts();
@@ -65,58 +70,114 @@ export async function render(ctx) {
 
 /* ============ いま勉強中 ============ */
 
-function renderLiveSection(liveUsers) {
+/**
+ * 「いま勉強中」のセクション。refresh() でサーバーの最新に合わせ、tick() で継続時間を1秒進める。
+ * カードはユーザーごとに使い回し、増えた人は足し、終わった人は消す。
+ */
+function createLiveSection() {
   const section = el(`
-    <section class="live">
+    <section class="live u-hidden">
       <div class="live__head">
         <span class="live__dot"></span>
         <h2 class="live__title">いま勉強中</h2>
-        <span class="u-small u-weak">${liveUsers.length}人</span>
+        <span class="u-small u-weak" data-live-count></span>
       </div>
       <div class="live__list"></div>
     </section>
   `);
-
   const list = section.querySelector(".live__list");
-  liveUsers.forEach((user) => {
-    list.appendChild(el(`
-      <article class="live-card" data-live-id="${user.id}">
-        ${gaugeHtml(user.loc, 62, 6)}
-        <div class="live-card__name">${esc(user.name)}</div>
-        <div class="live-card__material">${esc(user.material.title)}</div>
-        <div class="live-card__timer tabular" data-live-timer>
-          ${formatClock((Date.now() - user.startedAt) / 1000)}
-        </div>
-      </article>
-    `));
-  });
+  const countEl = section.querySelector("[data-live-count]");
+  /** ユーザーID → { card, session, fetchedAt } */
+  const entries = new Map();
+  let refreshing = false;
 
-  return section;
+  async function refresh() {
+    if (refreshing || document.visibilityState !== "visible") return;
+    refreshing = true;
+    try {
+      const sessions = await store.getLiveSessions();
+      const fetchedAt = Date.now();
+      // 幅が取れないとスパークラインが描けないので、先に表示しておく
+      section.classList.toggle("u-hidden", sessions.length === 0);
+      countEl.textContent = `${sessions.length}人`;
+
+      const alive = new Set();
+      sessions.forEach((session) => {
+        alive.add(session.user.id);
+        let entry = entries.get(session.user.id);
+        if (!entry) {
+          entry = { card: el(liveCardHtml(session)) };
+          entries.set(session.user.id, entry);
+          list.appendChild(entry.card);
+        }
+        entry.session = session;
+        entry.fetchedAt = fetchedAt;
+        updateLiveCard(entry);
+      });
+      entries.forEach((entry, userId) => {
+        if (!alive.has(userId)) {
+          entry.card.remove();
+          entries.delete(userId);
+        }
+      });
+    } catch (err) {
+      console.warn("[timeline] いま勉強中を取れませんでした", err);
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  function tick() {
+    entries.forEach((entry) => {
+      entry.card.querySelector("[data-live-timer]").textContent = formatClock(liveElapsedSec(entry));
+    });
+  }
+
+  return { section, refresh, tick };
 }
 
-/**
- * 1秒ごとに継続時間と LoC を更新する。
- * 本番では LoC はサーバーから配信される想定なので、ここではモックとして
- * 小さなランダムウォークで動かしている（locClient.js と同じ考え方）。
- */
-function startLiveTicker(section, liveUsers) {
-  const cards = new Map();
-  liveUsers.forEach((user) => {
-    const card = section.querySelector(`[data-live-id="${user.id}"]`);
-    if (card) cards.set(user.id, { user, card, loc: user.loc });
-  });
+/** 継続時間。一時停止中でなければ、最後に届いてからの時間も足して進める */
+function liveElapsedSec({ session, fetchedAt }) {
+  if (session.status === "paused") return session.elapsedSec;
+  return session.elapsedSec + session.secondsSinceUpdate + (Date.now() - fetchedAt) / 1000;
+}
 
-  return setInterval(() => {
-    cards.forEach((entry) => {
-      // 継続時間
-      const elapsed = (Date.now() - entry.user.startedAt) / 1000;
-      entry.card.querySelector("[data-live-timer]").textContent = formatClock(elapsed);
+function liveCardHtml(session) {
+  const { user } = session;
+  return `
+    <a class="live-card" href="#/users/${user.id}">
+      ${gaugeHtml(0, 62, 6)}
+      <div class="live-card__name">${esc(user.name)}${session.isMine ? '<span class="u-weak">（自分）</span>' : ""}</div>
+      <div class="live-card__material" data-live-material></div>
+      <div class="live-card__state" data-live-state></div>
+      <canvas class="live-card__spark" data-live-spark aria-hidden="true"></canvas>
+      <div class="live-card__timer tabular" data-live-timer></div>
+    </a>`;
+}
 
-      // LoC（ゆるやかに揺らす）
-      entry.loc = clampLoc(entry.loc + (Math.random() - 0.5) * 4);
-      updateGauge(entry.card.querySelector("[data-gauge]"), entry.loc);
-    });
-  }, 1000);
+/** カードを今の状態に合わせる（LoC・状態・直近の推移・教材・継続時間） */
+function updateLiveCard(entry) {
+  const { card, session } = entry;
+  const gauge = card.querySelector("[data-gauge]");
+  const hasLoc = typeof session.loc === "number";
+  updateGauge(gauge, hasLoc ? session.loc : 0);
+  gauge.classList.toggle("gauge--none", !hasLoc);
+  if (!hasLoc) {
+    gauge.classList.remove("is-loc-high", "is-loc-mid", "is-loc-low");
+    gauge.querySelector("[data-gauge-value]").textContent = "—";
+  }
+  card.classList.toggle("is-paused", session.status === "paused");
+
+  card.querySelector("[data-live-material]").textContent = session.material.title;
+  card.querySelector("[data-live-state]").textContent =
+    LIVE_STATUS_LABEL[session.status] || (hasLoc ? "" : "LoC計測なし");
+
+  const spark = card.querySelector("[data-live-spark]");
+  const showSpark = session.recent.length >= 2;
+  spark.classList.toggle("u-hidden", !showSpark);
+  if (showSpark) drawSparkline(spark, session.recent);
+
+  card.querySelector("[data-live-timer]").textContent = formatClock(liveElapsedSec(entry));
 }
 
 /* ============ 投稿カード ============ */
