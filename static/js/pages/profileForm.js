@@ -4,9 +4,14 @@
  *  初回ログイン時の設定（#/setup）とプロフィール編集（#/profile/edit）の両方で使う。
  *  ニックネームだけ必須で、ほかはすべて任意。
  *  保存はサーバー側でも検証するので、ここでのチェックは入力しやすさのためのもの。
+ *
+ *  プロフィール画像は、選んだ画像の真ん中を正方形に切り抜いて AVATAR_SIZE px に縮め、
+ *  JPEG にしてから送る（スマホの写真をそのまま送ると大きすぎるため）。
+ *  送るのは「保存」を押したとき（プロフィールを保存したあと）。画像を設定しない人は色の丸のまま。
  */
 
 import { el, esc, toast } from "../utils.js";
+import { icon } from "../icons.js";
 import * as store from "../store.js";
 
 /** アイコンの色の候補（科目色と同じトーンでそろえる） */
@@ -19,6 +24,10 @@ const GRADES = ["中学1年生", "中学2年生", "中学3年生", "高校1年�
   "既卒生", "大学生", "社会人", "その他"];
 
 const GENDERS = ["男性", "女性", "その他", "回答しない"];
+
+/** プロフィール画像の一辺（px）と JPEG の画質 */
+const AVATAR_SIZE = 256;
+const AVATAR_QUALITY = 0.85;
 
 const PREFECTURES = [
   "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
@@ -40,6 +49,10 @@ const PREFECTURES = [
 export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
   const p = store.getProfile();
   const color = p.avatarColor || store.DEFAULT_AVATAR_COLOR;
+  /** 画像：今の画像の URL と、保存時にすること（"upload" で pendingImage を送る / "delete" で消す） */
+  let currentImageUrl = store.getMe().avatarUrl;
+  let pendingImage = null;
+  let imageAction = null;
   const thisYear = new Date().getFullYear();
   const goalHours = typeof p.weeklyGoalMinutes === "number" ? p.weeklyGoalMinutes / 60 : "";
 
@@ -50,12 +63,22 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
         <h2 class="card__title">アイコンと名前</h2>
         <div class="profile-form__avatar">
           <div class="avatar avatar--lg" data-preview style="background:${color}"></div>
-          <div class="color-picker" role="radiogroup" aria-label="アイコンの色">
-            ${AVATAR_COLORS.map((c) => `
-              <label class="color-picker__item" style="--swatch:${c}">
-                <input type="radio" name="avatarColor" value="${c}" ${c === color ? "checked" : ""} />
-                <span class="sr-only">${c}</span>
-              </label>`).join("")}
+          <div class="profile-form__avatar-controls">
+            <div class="u-row" style="gap:8px;flex-wrap:wrap">
+              <label class="btn btn--ghost btn--sm">
+                ${icon("image", 16)}<span data-image-label>画像を選ぶ</span>
+                <input type="file" accept="image/*" class="sr-only" data-image-input />
+              </label>
+              <button class="btn btn--ghost btn--sm u-hidden" type="button" data-act="remove-image">画像をやめる</button>
+            </div>
+            <div class="field__hint">画像を設定しないときは、下の色の丸にニックネームの1文字目が入ります</div>
+            <div class="color-picker" role="radiogroup" aria-label="アイコンの色">
+              ${AVATAR_COLORS.map((c) => `
+                <label class="color-picker__item" style="--swatch:${c}">
+                  <input type="radio" name="avatarColor" value="${c}" ${c === color ? "checked" : ""} />
+                  <span class="sr-only">${c}</span>
+                </label>`).join("")}
+            </div>
           </div>
         </div>
 
@@ -121,14 +144,40 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
 
   const preview = node.querySelector("[data-preview]");
   const nicknameInput = node.querySelector('[name="nickname"]');
+  const imageInput = node.querySelector("[data-image-input]");
+  const removeImageBtn = node.querySelector('[data-act="remove-image"]');
   const updatePreview = () => {
     const picked = node.querySelector('[name="avatarColor"]:checked')?.value || color;
     preview.style.background = picked;
-    preview.textContent = Array.from(nicknameInput.value.trim())[0] || "?";
+    const imageUrl = pendingImage || (imageAction === "delete" ? null : currentImageUrl);
+    preview.classList.toggle("avatar--img", Boolean(imageUrl));
+    if (imageUrl) preview.innerHTML = `<img src="${esc(imageUrl)}" alt="" />`;
+    else preview.textContent = Array.from(nicknameInput.value.trim())[0] || "?";
+    removeImageBtn.classList.toggle("u-hidden", !imageUrl);
+    node.querySelector("[data-image-label]").textContent = imageUrl ? "画像を変える" : "画像を選ぶ";
   };
   updatePreview();
   node.addEventListener("input", updatePreview);
   node.addEventListener("change", updatePreview);
+
+  imageInput.addEventListener("change", async () => {
+    const file = imageInput.files?.[0];
+    imageInput.value = "";  // 同じ画像を選び直しても change が起きるように
+    if (!file) return;
+    try {
+      pendingImage = await squareImage(file);
+      imageAction = "upload";
+    } catch {
+      toast("この画像は読み込めませんでした。JPEG か PNG の画像を選んでください");
+    }
+    updatePreview();
+  });
+
+  removeImageBtn.addEventListener("click", () => {
+    pendingImage = null;
+    imageAction = currentImageUrl ? "delete" : null;
+    updatePreview();
+  });
 
   node.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -145,7 +194,13 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
 
     submit.disabled = true;
     try {
-      const user = await store.saveProfile(profile);
+      let user = await store.saveProfile(profile);
+      // 画像はプロフィールを保存したあとに送る（初回設定ではユーザーがまだ設定前のため）
+      if (imageAction === "upload") user = await store.uploadAvatar(pendingImage);
+      if (imageAction === "delete") user = await store.deleteAvatar();
+      currentImageUrl = store.getMe().avatarUrl;
+      pendingImage = null;
+      imageAction = null;
       onSaved(user);
     } catch (err) {
       showError(node, errorBox, err.message, err.field);
@@ -159,6 +214,37 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
   });
 
   return node;
+}
+
+/**
+ * 画像ファイルの真ん中を正方形に切り抜き、AVATAR_SIZE px の JPEG（data URL）にする。
+ * スマホの写真の向き（EXIF）は、いまのブラウザは img に描くときに直してくれる。
+ */
+function squareImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      if (!side) return reject(new Error("画像の大きさが取れません"));
+      const canvas = document.createElement("canvas");
+      canvas.width = AVATAR_SIZE;
+      canvas.height = AVATAR_SIZE;
+      const ctx = canvas.getContext("2d");
+      // 透過 PNG の背景が黒くならないように白で塗っておく
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, AVATAR_SIZE, AVATAR_SIZE);
+      ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side,
+                    0, 0, AVATAR_SIZE, AVATAR_SIZE);
+      resolve(canvas.toDataURL("image/jpeg", AVATAR_QUALITY));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("画像を読み込めません"));
+    };
+    img.src = url;
+  });
 }
 
 /** フォームの値を API に送る形にする */

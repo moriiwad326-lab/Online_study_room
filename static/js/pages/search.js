@@ -2,11 +2,12 @@
  * pages/search.js : さがす（#/search）
  *
  *  - 検索バー（入力すると、ニックネームでユーザーを探し、自分の教材と記事を絞り込む）
+ *  - 検索結果（ユーザー・教材）。スマホでも見つけやすいよう、検索バーのすぐ下に出す
  *  - 「ユーザー／教材／大学をさがす」カード（ユーザーは検索バーへ。教材・大学はモック）
- *  - 記事一覧（モックデータ）
+ *  - 記事一覧（モックデータ。押すと「これはモックです」と出す）
  */
 
-import { el, esc, formatRelative, thumbHtml } from "../utils.js";
+import { el, esc, formatRelative, thumbHtml, toast } from "../utils.js";
 import { icon } from "../icons.js";
 import * as store from "../store.js";
 import { personRowHtml, bindFollowButtons } from "./people.js";
@@ -31,19 +32,7 @@ export async function render() {
         <input type="search" placeholder="ユーザー（ニックネーム）・教材・記事で検索" data-search aria-label="検索">
       </div>
 
-      <!-- 何をさがすか -->
-      <section class="section">
-        <div class="grid-3">
-          ${store.getFindTargets().map((t) => `
-            <button class="find-card" type="button" data-find="${t.key}">
-              <div class="find-card__icon">${icon(findIcons[t.key] || "search", 22)}</div>
-              <div>${esc(t.label)}</div>
-              <div class="u-small u-weak u-bold">${esc(t.desc)}</div>
-            </button>`).join("")}
-        </div>
-      </section>
-
-      <!-- 検索結果（入力があるときだけ表示） -->
+      <!-- 検索結果（入力があるときだけ、検索バーのすぐ下に表示） -->
       <section class="section u-hidden" data-user-results>
         <div class="section__head"><h2 class="section__title">ユーザー</h2></div>
         <div class="card" data-user-list></div>
@@ -52,6 +41,18 @@ export async function render() {
       <section class="section u-hidden" data-results>
         <div class="section__head"><h2 class="section__title">教材の検索結果</h2></div>
         <div class="card" data-results-list></div>
+      </section>
+
+      <!-- 何をさがすか（検索中は結果を見やすくするため隠す） -->
+      <section class="section" data-find-targets>
+        <div class="grid-3">
+          ${store.getFindTargets().map((t) => `
+            <button class="find-card" type="button" data-find="${t.key}">
+              <div class="find-card__icon">${icon(findIcons[t.key] || "search", 22)}</div>
+              <div>${esc(t.label)}</div>
+              <div class="u-small u-weak u-bold">${esc(t.desc)}</div>
+            </button>`).join("")}
+        </div>
       </section>
 
       <!-- 記事一覧 -->
@@ -71,16 +72,20 @@ export async function render() {
     const list = articles.filter((a) => match(a.title + a.tag, keyword));
     articleBox.innerHTML = list.length
       ? list.map((a) => `
-          <article class="article">
+          <button class="article" type="button" data-article="${esc(a.id)}">
             <div class="article__thumb">${esc(a.tag)}</div>
             <div>
               <div class="article__title">${esc(a.title)}</div>
               <div class="u-small u-weak">${esc(a.source)}・${formatRelative(a.createdAt)}</div>
             </div>
-          </article>`).join("")
+          </button>`).join("")
       : `<div class="empty">該当する記事がありません</div>`;
   };
   drawArticles();
+  // 記事はまだ本文の無いモック
+  articleBox.addEventListener("click", (e) => {
+    if (e.target.closest("[data-article]")) toast("これはモックです（記事の本文はまだありません）");
+  });
 
   /* ---- 教材の絞り込み ---- */
   const resultsSection = node.querySelector("[data-results]");
@@ -107,9 +112,11 @@ export async function render() {
   };
 
   const input = node.querySelector("[data-search]");
+  const findTargets = node.querySelector("[data-find-targets]");
   input.addEventListener("input", (e) => {
     const keyword = e.target.value.trim();
     drawArticles(keyword);
+    findTargets.classList.toggle("u-hidden", Boolean(keyword));
 
     clearTimeout(userTimer);
     if (!keyword) {
@@ -141,10 +148,10 @@ export async function render() {
     btn.addEventListener("click", () => {
       if (btn.dataset.find === "user") {
         input.focus();
-        import("../utils.js").then(({ toast }) => toast("ニックネームを入力してください"));
+        toast("ニックネームを入力してください");
         return;
       }
-      import("../utils.js").then(({ toast }) => toast("この検索はモックです"));
+      toast("この検索はモックです");
     });
   });
 

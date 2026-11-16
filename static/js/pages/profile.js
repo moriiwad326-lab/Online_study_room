@@ -10,6 +10,7 @@ import { el, esc, formatDuration, formatRelative, toast, openModal } from "../ut
 import { icon } from "../icons.js";
 import * as store from "../store.js";
 import { renderProfileForm } from "./profileForm.js";
+import { avatarHtml } from "./people.js";
 
 export const meta = { title: "プロフィール" };
 
@@ -32,7 +33,7 @@ export async function render({ param, navigate }) {
       <!-- 見出し -->
       <section class="card">
         <div class="profile-head">
-          <div class="avatar avatar--lg" style="background:${me.avatarColor}">${esc(me.initial)}</div>
+          ${avatarHtml(me, "avatar--lg")}
           <div>
             <div class="profile-head__name">${esc(me.name)}</div>
             <div class="u-small u-muted">${esc(joinSet([me.grade, me.targetSchool && `志望：${me.targetSchool}`]))}</div>
@@ -116,7 +117,7 @@ export async function render({ param, navigate }) {
       <section class="card">
         <h2 class="card__title">設定</h2>
         <p class="u-small u-muted" style="margin-bottom:10px">
-          学習記録はサーバーに保存され、フォローしている人のタイムラインにも表示されます。いいねはこのブラウザにだけ保存されます。
+          学習記録はサーバーに保存され、フォローしている人のタイムラインにも表示されます。
         </p>
         <div class="u-row" style="flex-wrap:wrap">
           <button class="btn btn--ghost btn--sm" type="button" data-act="reset">
@@ -125,6 +126,8 @@ export async function render({ param, navigate }) {
           <button class="btn btn--ghost btn--sm" type="button" data-act="logout">
             ${icon("logout", 16)}ログアウト
           </button>
+          ${store.isAdmin() ? `<a class="btn btn--ghost btn--sm" href="#/admin">${icon("lock", 16)}管理</a>` : ""}
+          <a class="btn btn--ghost btn--sm" href="#/help">${icon("help", 16)}LoC とは？・更新情報</a>
         </div>
       </section>
     </div>
@@ -135,7 +138,7 @@ export async function render({ param, navigate }) {
     const ok = await openModal({
       title: "保存データを初期化しますか？",
       okLabel: "初期化する",
-      bodyHtml: `<p class="u-muted">自分の学習記録（サーバー上のものも）といいねがすべて消えます。元に戻せません。</p>`,
+      bodyHtml: `<p class="u-muted">自分の学習記録（サーバー上のものも）と、それについたいいね・返信がすべて消えます。元に戻せません。</p>`,
     });
     if (!ok) return;
     try {

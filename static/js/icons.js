@@ -121,6 +121,36 @@ export const icons = {
   lock: (s) => svg(`
     <rect x="5" y="10.5" width="14" height="10" rx="2"/>
     <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>`, s),
+
+  // LoC計測：メーター（半円のゲージと針）
+  loc: (s) => svg(`
+    <path d="M3.5 17a8.5 8.5 0 1 1 17 0"/>
+    <path d="M12 17l4.2-5.2"/>
+    <circle cx="12" cy="17" r="1.4" fill="currentColor" stroke="none"/>
+    <path d="M6 13.2l1 .6M12 8.5v1.2M18 13.2l-1 .6"/>`, s),
+
+  // ？（LoC とは）
+  help: (s) => svg(`
+    <circle cx="12" cy="12" r="9"/>
+    <path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.7c0 1.7-2.5 2.2-2.5 3.9"/>
+    <circle cx="12" cy="17.2" r=".9" fill="currentColor" stroke="none"/>`, s),
+
+  // 削除：ゴミ箱
+  trash: (s) => svg(`
+    <path d="M4 7h16M10 11v6M14 11v6"/>
+    <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/>
+    <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>`, s),
+
+  // 返信：折り返す矢印
+  reply: (s) => svg(`
+    <path d="M9 14 4 9l5-5"/>
+    <path d="M4 9h10a6 6 0 0 1 6 6v4"/>`, s),
+
+  // 画像
+  image: (s) => svg(`
+    <rect x="3" y="4" width="18" height="16" rx="2"/>
+    <circle cx="9" cy="10" r="1.8"/>
+    <path d="m21 16-5-5-9 9"/>`, s),
 };
 
 /** 名前でアイコンを取り出す（未定義なら空文字） */

@@ -3,10 +3,13 @@
 - フォローは承認なしで、すぐに成立する（片方向）。フォローされると相手に通知が届く
 - メッセージ（1対1）は、相互フォローの相手とだけやりとりできる。相互でなくなったら、
   過去のやりとりは読めるが新しくは送れない
-- 通知は「フォローされた」「招待申請が届いた（管理者あて）」「招待申請の結果」の3種類。
+- 通知は「フォローされた」「いいねされた」「返信された」「招待申請が届いた（管理者あて）」
+  「招待申請の結果」「運営からのお知らせ（アップデートなど）」。
   メッセージは通知に入れず、未読数を別に数える（ヘッダーのバッジが別なので）
-- 他の人に見せるプロフィールは、ニックネーム・アイコン色・自己紹介・タグ・学年・志望・目標だけ。
+- 他の人に見せるプロフィールは、ニックネーム・アイコン（色・画像の版数）・自己紹介・タグ・学年・志望・目標だけ。
   メールアドレス・性別・生まれた年・都道府県は本人以外に出さない
+- 新規登録の初回設定で「運営アカウント（FEATURED_NICKNAME）をフォローする」を選べるよう、
+  そのアカウントを探す（ニックネームが一致し、かつ管理者のユーザー）
 
 HTTP の扱いは `server.py`、ここは純粋なデータ操作だけを持つ。
 """
@@ -29,10 +32,18 @@ SEARCH_LIMIT = 30
 NOTIFICATION_LIMIT = 50
 MESSAGE_PAGE = 200
 
-# 他の人に見せてよいプロフィールの項目
-PUBLIC_PROFILE_KEYS = ("nickname", "avatarColor", "bio", "tags", "grade", "targetSchool", "examName")
+# 他の人に見せてよいプロフィールの項目と、未設定のときの値
+PUBLIC_PROFILE_DEFAULTS = {
+    "nickname": "", "avatarColor": "", "avatarVersion": None, "bio": "", "tags": [],
+    "grade": "", "targetSchool": "", "examName": "",
+}
+PUBLIC_PROFILE_KEYS = tuple(PUBLIC_PROFILE_DEFAULTS)
 
-NOTIFICATION_TYPES = ("follow", "invite_request", "invite_approved", "invite_rejected")
+NOTIFICATION_TYPES = ("follow", "like", "reply", "invite_request", "invite_approved", "invite_rejected",
+                      "announcement")
+
+# 初回設定で「フォローする」を勧める運営アカウントのニックネーム（大文字小文字は区別しない）
+FEATURED_NICKNAME = "molix"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS follows (
@@ -74,8 +85,8 @@ def public_profile(row: sqlite3.Row) -> Dict[str, Any]:
     """users の行（id, profile）から、他の人に見せてよい形を作る。"""
     profile = json.loads(row["profile"])
     user = {"id": row["id"]}
-    for key in PUBLIC_PROFILE_KEYS:
-        user[key] = profile.get(key, [] if key == "tags" else "")
+    for key, default in PUBLIC_PROFILE_DEFAULTS.items():
+        user[key] = profile.get(key, default)
     return user
 
 
@@ -155,6 +166,18 @@ class SocialStore:
                 "   AND json_extract(profile, '$.nickname') LIKE ? ESCAPE '\\'"
                 " ORDER BY id LIMIT ?",
                 (viewer_id, f"%{_escape_like(query)}%", SEARCH_LIMIT),
+            ).fetchall()
+            return [self._with_relation(conn, viewer_id, row) for row in rows]
+
+    def featured_users(self, viewer_id: int) -> List[Dict[str, Any]]:
+        """初回設定で勧める運営アカウント（自分は除く）。見つからなければ空。"""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT id, profile FROM users"
+                " WHERE profile_completed = 1 AND is_admin = 1 AND id <> ?"
+                "   AND lower(json_extract(profile, '$.nickname')) = lower(?)"
+                " ORDER BY id",
+                (viewer_id, FEATURED_NICKNAME),
             ).fetchall()
             return [self._with_relation(conn, viewer_id, row) for row in rows]
 

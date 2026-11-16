@@ -1,6 +1,7 @@
 """Onsta アプリサーバーの起動スクリプト。
 
 フロント（static/）の配信と API（ログイン・教材）を http://localhost:8000/ で立てる。
+新しい版（System/announcements.py の APP_VERSION）で初めて起動したときは、全ユーザーに更新のお知らせを送る。
 LoC 推論も使うときは、別のターミナルで `python LoC/server.py --no-static` を起動する。
 
 ログインは Google アカウントのみ。先に Google Cloud で OAuth クライアントを作り、
@@ -29,6 +30,7 @@ import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
+from System.announcements import APP_VERSION, announce_release
 from System.auth import AuthStore
 from System.books import BookLookup
 from System.db import DEFAULT_DB_PATH
@@ -93,10 +95,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     store = AuthStore(Path(args.db))
     materials = MaterialStore(Path(args.db))
+    # 新しい版で初めて起動したら、全ユーザーに更新のお知らせを1回だけ送る
+    notified = announce_release(Path(args.db))
+    if notified:
+        print(f"Onsta ver{APP_VERSION} の更新のお知らせを {notified} 人に送りました")
     books = BookLookup(google_api_key=args.google_books_key)
     httpd = make_server(args.host, args.port, Path(args.static_dir), store, materials, books, google,
                         secure_cookie=public_url.startswith("https://"), loc_upstream=loc_upstream)
-    print(f"Onsta: {public_url}/  ← ブラウザで開く（DB: {args.db}）")
+    print(f"Onsta ver{APP_VERSION}: {public_url}/  ← ブラウザで開く（DB: {args.db}）")
     print(f"Google Cloud に登録するリダイレクト URI: {google.redirect_uri}")
     print("新規登録は招待制: python -m System.admin invite <メールアドレス>"
           "（Web の招待申請を承認する管理者は grant-admin <ユーザーID>）")

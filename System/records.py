@@ -6,6 +6,8 @@
   フォローは承認なしなので、記録はログインしている誰からでも見えるものとして扱う
 - localStorage に残っている記録は、ブラウザが一度だけ `import_records` で送ってくる。
   ブラウザ側の ID（client_id）で重複を弾くので、何度送られても増えない
+- 記録は投稿としていいね・返信を受ける（posts.py）。一覧には見ている人から見たいいね・返信の数を付ける。
+  記録は本人だけが消せ、消すといいね・返信と、それについての通知も消える
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from .auth import AuthError
 from .db import connect
 from .materials import SCHEMA as MATERIALS_SCHEMA
+from .posts import SCHEMA as POSTS_SCHEMA, attach_reactions, delete_record_notifications
 from .social import SCHEMA as SOCIAL_SCHEMA, public_profile
 
 MAX_DURATION_MIN = 24 * 60
@@ -138,7 +141,7 @@ class RecordStore:
         self.db_path = Path(db_path)
         with closing(connect(self.db_path)) as conn, conn:
             # 教材・フォローの表と JOIN するので、先に作られていなくても困らないようにする
-            conn.executescript(MATERIALS_SCHEMA + SOCIAL_SCHEMA + SCHEMA)
+            conn.executescript(MATERIALS_SCHEMA + SOCIAL_SCHEMA + SCHEMA + POSTS_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
         return connect(self.db_path)
@@ -188,7 +191,19 @@ class RecordStore:
 
     def delete_all(self, user_id: int) -> None:
         with closing(self._connect()) as conn, conn:
+            ids = [row[0] for row in conn.execute(
+                "SELECT id FROM study_records WHERE user_id = ?", (user_id,)).fetchall()]
+            delete_record_notifications(conn, ids)
             conn.execute("DELETE FROM study_records WHERE user_id = ?", (user_id,))
+
+    def delete_record(self, user_id: int, record_id: int) -> None:
+        """自分の記録を1件消す（他の人の記録は見つからないものとして扱う）。"""
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                "DELETE FROM study_records WHERE id = ? AND user_id = ?", (record_id, user_id))
+            if cur.rowcount == 0:
+                raise AuthError(404, "投稿が見つかりません")
+            delete_record_notifications(conn, [record_id])
 
     @staticmethod
     def _owns_material(conn: sqlite3.Connection, user_id: int, material_id: Optional[int]) -> bool:
@@ -211,10 +226,26 @@ class RecordStore:
     def _get(self, record_id: int) -> Dict[str, Any]:
         with closing(self._connect()) as conn:
             row = conn.execute(SELECT_RECORDS + " WHERE r.id = ?", (record_id,)).fetchone()
-        return self._record_json(row)
+            record = self._record_json(row)
+            attach_reactions(conn, row["user_id"], [record])
+        return record
 
-    def list_for_user(self, user_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """その人の記録（新しい順）。limit なしなら全部（自分のレポートの集計用）。"""
+    def get_record(self, viewer_id: int, record_id: int) -> Dict[str, Any]:
+        """1件の記録（投稿の詳細画面用）。いいね・返信の数は viewer_id から見たもの。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(SELECT_RECORDS + " WHERE r.id = ?", (record_id,)).fetchone()
+            if not row:
+                raise AuthError(404, "投稿が見つかりません")
+            record = self._record_json(row)
+            attach_reactions(conn, viewer_id, [record])
+        return record
+
+    def list_for_user(self, user_id: int, limit: Optional[int] = None,
+                      viewer_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """その人の記録（新しい順）。limit なしなら全部（自分のレポートの集計用）。
+
+        いいね・返信の数は viewer_id（省略時は本人）から見たもの。
+        """
         sql = SELECT_RECORDS + " WHERE r.user_id = ? ORDER BY r.created_at DESC, r.id DESC"
         params: List[Any] = [user_id]
         if limit is not None:
@@ -222,7 +253,9 @@ class RecordStore:
             params.append(limit)
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [self._record_json(row) for row in rows]
+            records = [self._record_json(row) for row in rows]
+            attach_reactions(conn, user_id if viewer_id is None else viewer_id, records)
+        return records
 
     def timeline(self, user_id: int) -> List[Dict[str, Any]]:
         """自分とフォロー中の人の記録（新しい順）。"""
@@ -234,7 +267,9 @@ class RecordStore:
                   " ORDER BY r.created_at DESC, r.id DESC LIMIT :limit",
                 {"me": user_id, "limit": TIMELINE_LIMIT},
             ).fetchall()
-        return [self._record_json(row) for row in rows]
+            records = [self._record_json(row) for row in rows]
+            attach_reactions(conn, user_id, records)
+        return records
 
     @staticmethod
     def _record_json(row: sqlite3.Row) -> Dict[str, Any]:

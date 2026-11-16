@@ -8,6 +8,8 @@
 - セッションはランダムなトークンを Cookie で渡し、DB には SHA-256 したものだけを保存する
   （DB が漏れてもそのままセッションに使えないように）
 - プロフィール（ニックネームなど）は JSON で保存し、受け付ける項目と長さはここで検証する
+- プロフィール画像は avatars に別に持ち、プロフィールの JSON には版数（avatarVersion）だけを入れる。
+  画像の URL に版数を付けてブラウザにキャッシュさせ、変えたら版数を上げる
 
 パスワード認証だった頃の DB は、起動時に移行してパスワードハッシュと全セッションを消す。
 旧アカウントのログインIDはメール確認をしていないので、同じ文字列のメールアドレスで
@@ -28,7 +30,7 @@ import time
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .db import connect
 
@@ -78,6 +80,11 @@ CREATE TABLE IF NOT EXISTS invitations (
     email      TEXT PRIMARY KEY,
     user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS avatars (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    data       BLOB    NOT NULL,
+    image_type TEXT    NOT NULL
 );
 """
 
@@ -299,11 +306,55 @@ class AuthStore:
     def update_profile(self, user_id: int, data: Any) -> Dict[str, Any]:
         profile = normalize_profile(data)
         with closing(self._connect()) as conn, conn:
+            # 画像の版数はフォームから来ないので、保存済みのものを引き継ぐ
+            row = conn.execute("SELECT profile FROM users WHERE id = ?", (user_id,)).fetchone()
+            version = json.loads(row["profile"]).get("avatarVersion") if row else None
+            if version:
+                profile["avatarVersion"] = version
             conn.execute(
                 "UPDATE users SET profile = ?, profile_completed = 1 WHERE id = ?",
                 (json.dumps(profile, ensure_ascii=False), user_id),
             )
         return self.get_user(user_id)
+
+    # ---- プロフィール画像 ----
+
+    def set_avatar(self, user_id: int, data: bytes, image_type: str) -> Dict[str, Any]:
+        """画像を保存して版数を上げる（画像の検証は呼び出し側で済ませておく）。"""
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO avatars (user_id, data, image_type) VALUES (?, ?, ?)"
+                " ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, image_type = excluded.image_type",
+                (user_id, data, image_type),
+            )
+            self._set_avatar_version(conn, user_id, True)
+        return self.get_user(user_id)
+
+    def delete_avatar(self, user_id: int) -> Dict[str, Any]:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM avatars WHERE user_id = ?", (user_id,))
+            self._set_avatar_version(conn, user_id, False)
+        return self.get_user(user_id)
+
+    @staticmethod
+    def _set_avatar_version(conn: sqlite3.Connection, user_id: int, has_image: bool) -> None:
+        row = conn.execute("SELECT profile FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise AuthError(404, "ユーザーが見つかりません")
+        profile = json.loads(row["profile"])
+        if has_image:
+            profile["avatarVersion"] = int(profile.get("avatarVersion") or 0) + 1
+        else:
+            profile.pop("avatarVersion", None)
+        conn.execute("UPDATE users SET profile = ? WHERE id = ?",
+                     (json.dumps(profile, ensure_ascii=False), user_id))
+
+    def get_avatar(self, user_id: int) -> Optional[Tuple[bytes, str]]:
+        """(画像のバイト列, MIME タイプ)。無ければ None。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT data, image_type FROM avatars WHERE user_id = ?", (user_id,)).fetchone()
+        return (bytes(row["data"]), row["image_type"]) if row else None
 
     # ---- 招待（admin.py から使う） ----
 

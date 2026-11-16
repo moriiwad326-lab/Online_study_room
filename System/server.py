@@ -8,6 +8,8 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
                                      失敗したら /#/login?error=<コード> へ（JSON ではない）
     POST   /api/auth/logout
     PUT    /api/me/profile           プロフィールを保存（初回設定・編集の両方）
+    PUT    /api/me/avatar            {image(data URL)} プロフィール画像を変える {user}
+    DELETE /api/me/avatar            プロフィール画像をやめる（色の丸に戻す）{user}
 
     GET    /api/materials            自分のカテゴリと教材 {categories, materials}
     POST   /api/categories           {name, color} → カテゴリを作る
@@ -20,6 +22,13 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     POST   /api/records              {materialId, durationMin, memo?, locSeries?, source?} → 記録を追加
     POST   /api/records/import       {records:[...]} localStorage に残っていた記録を一度だけ取り込む
     DELETE /api/records              自分の学習記録をすべて消す
+    GET    /api/records/<id>         記録（投稿）1件 {record}
+    DELETE /api/records/<id>         自分の記録（投稿）を1件消す
+    PUT    /api/records/<id>/like    いいねする {likeCount, liked}
+    DELETE /api/records/<id>/like    いいねをやめる {likeCount, liked}
+    GET    /api/records/<id>/replies 投稿への返信（古い順。parentId で木になる）{replies}
+    POST   /api/records/<id>/replies {body, parentId?} → 返信する {reply}
+    DELETE /api/replies/<id>         返信を消す（書いた本人か投稿者）
     GET    /api/timeline             自分とフォロー中の人の学習記録 {records}
 
     GET    /api/live                 自分とフォロー中の人の、いま続いている LoC 計測 {sessions}
@@ -28,6 +37,8 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
 
     GET    /api/users?q=<文字>        ニックネームでユーザーを探す {users}
     GET    /api/users/<id>           公開プロフィール＋フォロー数＋自分との関係 {user}
+    GET    /api/users/<id>/avatar    プロフィール画像（JSON ではなく画像そのもの）
+    GET    /api/featured-users       初回設定でフォローを勧める運営アカウント {users}
     GET    /api/users/<id>/records   その人の学習記録 {records}
     GET    /api/users/<id>/followers フォロワー {users}
     GET    /api/users/<id>/following フォロー中 {users}
@@ -56,6 +67,7 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
                                      公開すれば済むようにするため。ログイン中で、同じオリジンの
                                      ページからの接続だけ通す
 
+記録には、見ている人から見た likeCount / liked / replyCount が付く。
 自分は {id, email, profileCompleted, isAdmin, profile} の形で返す。他の人は公開してよい項目だけ
 （social.PUBLIC_PROFILE_KEYS）で、メールアドレスは出さない。
 セッションは HttpOnly の Cookie で持つ。書き込み系は Content-Type: application/json を必須にして、
@@ -85,6 +97,7 @@ from .google_oauth import FLOW_TTL_SEC, START_PATH, GoogleOAuth, OAuthFailure
 from .invites import TICKET_TTL_SEC, InviteRequestStore
 from .live import LiveStore
 from .materials import MaterialStore, decode_image, sniff_image_type
+from .posts import PostStore
 from .records import USER_RECORDS_LIMIT, RecordStore
 from .social import SocialStore
 
@@ -100,6 +113,8 @@ MAX_BODY_BYTES = 16 * 1024
 MAX_MATERIAL_BODY_BYTES = 3 * 1024 * 1024
 # localStorage の記録をまとめて取り込むときだけ大きめに
 MAX_IMPORT_BODY_BYTES = 2 * 1024 * 1024
+# プロフィール画像（ブラウザで 256px 四方に縮めてから送ってくる）
+MAX_AVATAR_BODY_BYTES = 512 * 1024
 # 推論サーバーへ中継しないヘッダー（Cookie は推論サーバーに渡す必要がない）
 LOC_DROP_HEADERS = {"host", "cookie"}
 CRLF = "\r\n"
@@ -113,6 +128,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     google: GoogleOAuth
     social: SocialStore
     records: RecordStore
+    posts: PostStore
     invites: InviteRequestStore
     live: LiveStore
     secure_cookie = False
@@ -125,6 +141,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("GET", r"/api/auth/google/callback", "_google_callback"),
         ("POST", r"/api/auth/logout", "_logout"),
         ("PUT", r"/api/me/profile", "_update_profile"),
+        ("PUT", r"/api/me/avatar", "_set_avatar"),
+        ("DELETE", r"/api/me/avatar", "_delete_avatar"),
         ("GET", r"/api/materials", "_list_materials"),
         ("POST", r"/api/categories", "_add_category"),
         ("POST", r"/api/materials", "_add_material"),
@@ -135,6 +153,13 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("POST", r"/api/records", "_add_record"),
         ("POST", r"/api/records/import", "_import_records"),
         ("DELETE", r"/api/records", "_delete_records"),
+        ("GET", r"/api/records/(\d+)", "_get_record"),
+        ("DELETE", r"/api/records/(\d+)", "_delete_record"),
+        ("PUT", r"/api/records/(\d+)/like", "_like"),
+        ("DELETE", r"/api/records/(\d+)/like", "_unlike"),
+        ("GET", r"/api/records/(\d+)/replies", "_list_replies"),
+        ("POST", r"/api/records/(\d+)/replies", "_add_reply"),
+        ("DELETE", r"/api/replies/(\d+)", "_delete_reply"),
         ("GET", r"/api/timeline", "_timeline"),
         ("GET", r"/api/live", "_list_live"),
         ("PUT", r"/api/live", "_update_live"),
@@ -142,6 +167,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("GET", r"/api/users", "_search_users"),
         ("GET", r"/api/users/(\d+)", "_get_user"),
         ("GET", r"/api/users/(\d+)/records", "_user_records"),
+        ("GET", r"/api/users/(\d+)/avatar", "_avatar"),
+        ("GET", r"/api/featured-users", "_featured_users"),
         ("GET", r"/api/users/(\d+)/followers", "_followers"),
         ("GET", r"/api/users/(\d+)/following", "_following"),
         ("PUT", r"/api/users/(\d+)/follow", "_follow"),
@@ -253,6 +280,24 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         body = self._read_json()
         self._send_json(200, {"user": self.store.update_profile(user["id"], body.get("profile"))})
 
+    def _set_avatar(self) -> None:
+        user = self._require_user()
+        body = self._read_json(MAX_AVATAR_BODY_BYTES)
+        data, image_type = decode_image(body.get("image"))
+        self._send_json(200, {"user": self.store.set_avatar(user["id"], data, image_type)})
+
+    def _delete_avatar(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"user": self.store.delete_avatar(user["id"])})
+
+    def _avatar(self, user_id: int) -> None:
+        self._require_user()
+        avatar = self.store.get_avatar(user_id)
+        if not avatar:
+            raise AuthError(404, "画像がありません")
+        # URL に ?v=<avatarVersion> が付くので、キャッシュさせてよい
+        self._send_image(*avatar, cache="private, max-age=604800")
+
     # ---- 教材 ----
 
     def _list_materials(self) -> None:
@@ -296,14 +341,8 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         if owner is None or (owner != user["id"] and not self.social.is_following(user["id"], owner)):
             raise AuthError(404, "画像がありません")
         data, image_type = self.materials.get_image(owner, material_id)
-        self.send_response(200)
-        self.send_header("Content-Type", image_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("X-Content-Type-Options", "nosniff")
         # 画像の URL には ?v=<image_version> が付くので、本人のブラウザにはキャッシュさせてよい
-        self.cache_control = "private, max-age=604800"
-        self.end_headers()
-        self.wfile.write(data)
+        self._send_image(data, image_type, cache="private, max-age=604800")
 
     def _lookup_book(self, raw_isbn: str) -> None:
         self._require_user()
@@ -332,6 +371,43 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def _timeline(self) -> None:
         user = self._require_user()
         self._send_json(200, {"records": self.records.timeline(user["id"])})
+
+    def _get_record(self, record_id: int) -> None:
+        user = self._require_user()
+        record = self.records.get_record(user["id"], record_id)
+        self._hide_unfollowed_images(user["id"], record["user"]["id"], [record])
+        self._send_json(200, {"record": record})
+
+    def _delete_record(self, record_id: int) -> None:
+        user = self._require_user()
+        self.records.delete_record(user["id"], record_id)
+        self._send_json(200, {"ok": True})
+
+    # ---- いいね・返信 ----
+
+    def _like(self, record_id: int) -> None:
+        user = self._require_member()
+        self._read_json()
+        self._send_json(200, self.posts.like(user["id"], record_id))
+
+    def _unlike(self, record_id: int) -> None:
+        user = self._require_member()
+        self._send_json(200, self.posts.unlike(user["id"], record_id))
+
+    def _list_replies(self, record_id: int) -> None:
+        user = self._require_user()
+        self._send_json(200, {"replies": self.posts.list_replies(user["id"], record_id)})
+
+    def _add_reply(self, record_id: int) -> None:
+        user = self._require_member()
+        body = self._read_json()
+        reply = self.posts.add_reply(user["id"], record_id, body.get("body"), body.get("parentId"))
+        self._send_json(201, {"reply": reply})
+
+    def _delete_reply(self, reply_id: int) -> None:
+        user = self._require_member()
+        self.posts.delete_reply(user["id"], reply_id)
+        self._send_json(200, {"ok": True})
 
     # ---- いま勉強中 ----
 
@@ -362,13 +438,21 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
     def _user_records(self, user_id: int) -> None:
         user = self._require_user()
         target = self.social.get_user(user["id"], user_id)  # 見えない（初回設定前など）ユーザーなら 404
-        records = self.records.list_for_user(user_id, limit=USER_RECORDS_LIMIT)
-        # 教材の画像はフォロー中の人にだけ見せるので、それ以外には画像なしとして渡す
-        if not (target["isMe"] or target["isFollowing"]):
-            for record in records:
-                if record["material"]:
-                    record["material"]["hasImage"] = False
+        records = self.records.list_for_user(user_id, limit=USER_RECORDS_LIMIT, viewer_id=user["id"])
+        self._hide_unfollowed_images(user["id"], target["id"], records)
         self._send_json(200, {"records": records})
+
+    def _hide_unfollowed_images(self, viewer_id: int, owner_id: int, records) -> None:
+        """教材の画像はフォロー中の人にだけ見せるので、それ以外には画像なしとして渡す。"""
+        if viewer_id == owner_id or self.social.is_following(viewer_id, owner_id):
+            return
+        for record in records:
+            if record["material"]:
+                record["material"]["hasImage"] = False
+
+    def _featured_users(self) -> None:
+        user = self._require_user()
+        self._send_json(200, {"users": self.social.featured_users(user["id"])})
 
     def _followers(self, user_id: int) -> None:
         user = self._require_user()
@@ -532,6 +616,13 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
             raise AuthError(401, "ログインしてください")
         return user
 
+    def _require_member(self) -> Dict[str, Any]:
+        """初回設定まで済んだユーザー（他の人から見える人）だけに書き込ませる。"""
+        user = self._require_user()
+        if not user["profileCompleted"]:
+            raise AuthError(403, "先にマイページを設定してください")
+        return user
+
     def _require_admin(self) -> Dict[str, Any]:
         user = self._require_user()
         if not user["isAdmin"]:
@@ -576,6 +667,15 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_image(self, data: bytes, image_type: str, cache: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", image_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.cache_control = cache
+        self.end_headers()
+        self.wfile.write(data)
+
     def end_headers(self):
         # 開発中に JS を書き換えたとき古いものが使われないように（API の応答もキャッシュさせない）
         self.send_header("Cache-Control", getattr(self, "cache_control", "no-store"))
@@ -613,9 +713,10 @@ def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
                 loc_upstream: Optional[Tuple[str, int]] = None,
                 social: Optional[SocialStore] = None,
                 records: Optional[RecordStore] = None,
+                posts: Optional[PostStore] = None,
                 invites: Optional[InviteRequestStore] = None,
                 live: Optional[LiveStore] = None) -> http.server.ThreadingHTTPServer:
-    """social / records / invites / live を省略すると、store と同じ DB ファイルで作る。"""
+    """social / records / posts / invites / live を省略すると、store と同じ DB ファイルで作る。"""
     handler_cls = type("BoundAppHandler", (AppHandler,), {
         "store": store,
         "materials": materials,
@@ -623,6 +724,7 @@ def make_server(host: str, port: int, static_dir: Path, store: AuthStore,
         "google": google,
         "social": social or SocialStore(store.db_path),
         "records": records or RecordStore(store.db_path),
+        "posts": posts or PostStore(store.db_path),
         "invites": invites or InviteRequestStore(store.db_path),
         "live": live or LiveStore(store.db_path),
         "secure_cookie": secure_cookie,

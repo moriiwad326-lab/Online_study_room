@@ -1,11 +1,14 @@
 /**
- * pages/record.js : 記録する（#/record, #/record/add, #/record/<教材ID>）
+ * pages/record.js : LoC計測（#/record, #/record/add, #/record/<教材ID>）
  *
  *  #/record            … カテゴリごとの教材カード一覧＋教材の追加・新規記録ボタン
  *  #/record/add        … 教材を追加（バーコード／独自教材。pages/materialAdd.js）
  *  #/record/<教材ID>   … LoC計測モード（カメラ＋リアルタイムLoC）と手動記録
  *
  *  教材は最初は1冊もなく、ユーザーが自分で追加する。
+ *
+ *  計測中に別の画面へ移ろうとすると、app.js が「LoC計測を中断しますか？」と確かめる（shouldConfirmLeave）。
+ *  ページを閉じる・再読み込みするときは beforeunload でブラウザ標準の確認を出す。
  */
 
 import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average, thumbHtml } from "../utils.js";
@@ -15,7 +18,7 @@ import { LocClient, LOC_CONFIG, LOC_STATUS, statusLabel } from "../locClient.js"
 import * as store from "../store.js";
 import { renderAdd } from "./materialAdd.js";
 
-export const meta = { title: "記録する" };
+export const meta = { title: "LoC計測" };
 
 /* LoC が低い状態が続いたときの自動一時停止（継続時間を 0 に戻して止める） */
 const LOW_LOC = 15;              // これを下回ると「集中していない」とみなす
@@ -128,6 +131,14 @@ function renderList(ctx) {
 
   const node = el(`
     <div>
+      <div class="notice loc-intro">
+        ${icon("loc", 20)}
+        <div>
+          <div class="u-bold">教材を選んで LoC計測を始めましょう</div>
+          <div class="u-small u-muted">カメラで手元を写し、AI が集中度（LoC）を 0〜100 で推定します。
+            <a class="link-btn" href="#/help">LoC とは？</a></div>
+        </div>
+      </div>
       <div class="u-spread" style="margin-bottom:14px">
         <span class="u-small u-weak">${count ? `${count}冊の教材` : ""}</span>
         <a class="btn btn--ghost btn--sm" href="#/record/add">${icon("plus", 16)}教材を追加</a>
@@ -521,6 +532,8 @@ function renderMeasure(ctx) {
     sendLive();
     state.liveTimer = setInterval(sendLive, LIVE_INTERVAL_MS);
     window.addEventListener("pagehide", store.endLive);
+    // タブを閉じる・再読み込み・別のサイトへ移るときに、ブラウザの確認を出す
+    window.addEventListener("beforeunload", confirmUnload);
 
     // 5) 経過時間のカウント
     state.timer = setInterval(() => {
@@ -750,6 +763,13 @@ function renderMeasure(ctx) {
     box.appendChild(btn);
   }
 
+  /** 計測中にページを離れようとしたとき（文言はブラウザが決めるので変えられない） */
+  function confirmUnload(e) {
+    if (!state.running) return;
+    e.preventDefault();
+    e.returnValue = "";  // 古いブラウザ向け
+  }
+
   /** タイマー・カメラ・WebSocket をすべて止める */
   function cleanup() {
     if (state.running) store.endLive();
@@ -757,13 +777,15 @@ function renderMeasure(ctx) {
     clearInterval(state.timer);
     clearInterval(state.liveTimer);
     window.removeEventListener("pagehide", store.endLive);
+    window.removeEventListener("beforeunload", confirmUnload);
     state.client?.stop();
     state.chart?.destroy();
     state.stream?.getTracks().forEach((track) => track.stop());
     state.stream = null;
   }
 
-  return { node, destroy: cleanup };
+  // 計測中は、アプリの中で別の画面へ移る前に確かめてもらう（app.js）
+  return { node, destroy: cleanup, shouldConfirmLeave: () => state.running };
 }
 
 /**

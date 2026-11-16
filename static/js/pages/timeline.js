@@ -4,13 +4,15 @@
  *  - 「いま勉強中」：自分とフォロー中の人のうち LoC を計測中の人を横並びで出す。
  *    LIVE_POLL_MS ごとにサーバーへ聞き直して LoC・直近の推移を更新し、継続時間は1秒ごとに進める
  *  - 自分とフォロー中の人の学習記録を投稿カードとして並べ、平均LoC とスパークラインを添える
- *    （投稿カードは user.js のユーザーページでも使う）
+ *    （投稿カードは user.js のユーザーページと post.js の投稿の詳細でも使う）
+ *  - 投稿カードからいいね（相手に通知が届く）・返信（投稿の詳細へ）・削除（自分の投稿だけ）ができる
  */
 
-import { el, esc, formatRelative, formatDuration, formatClock, locLevelClass, thumbHtml } from "../utils.js";
+import { el, esc, formatRelative, formatDuration, formatClock, locLevelClass, thumbHtml, toast, openModal } from "../utils.js";
 import { icon } from "../icons.js";
 import { gaugeHtml, updateGauge, drawSparkline } from "../charts.js";
 import * as store from "../store.js";
+import { avatarHtml } from "./people.js";
 
 /** 「いま勉強中」をサーバーに聞き直す間隔（ms）。計測画面が送ってくるのも約5秒ごと */
 const LIVE_POLL_MS = 5000;
@@ -191,13 +193,20 @@ export function drawSparklines(root) {
   });
 }
 
-export function renderPostCard(post) {
+/**
+ * 投稿カード。
+ * @param {object} post store の投稿の形
+ * @param {object} [opts]
+ * @param {boolean} [opts.detail]   投稿の詳細画面で使う（返信ボタンは返信欄へ移るだけにする）
+ * @param {() => void} [opts.onDeleted] 削除できたあとに呼ぶ（省略時はカードを消すだけ）
+ */
+export function renderPostCard(post, { detail = false, onDeleted } = {}) {
   const hasLoc = typeof post.avgLoc === "number" && post.locSeries?.length > 1;
 
   const card = el(`
     <article class="card post">
       <a class="post__head post__head--link" href="#/users/${post.userId}">
-        <div class="avatar" style="background:${esc(post.avatarColor)}">${esc(post.initial)}</div>
+        ${avatarHtml(post)}
         <div>
           <div class="post__name">${esc(post.userName)}${post.isMine ? '<span class="u-small u-weak">（自分）</span>' : ""}</div>
           <div class="post__time">${formatRelative(post.createdAt)}</div>
@@ -225,29 +234,74 @@ export function renderPostCard(post) {
         </div>` : ""}
 
       <footer class="post__foot">
-        <button class="action-btn ${post.liked ? "is-on" : ""}" type="button" data-act="like">
+        <button class="action-btn ${post.liked ? "is-on" : ""}" type="button" data-act="like"
+                aria-label="いいね" aria-pressed="${post.liked}">
           ${icon("like", 18)}<span data-like-count>${post.likes}</span>
         </button>
-        <button class="action-btn" type="button" data-act="comment">
-          ${icon("comment", 18)}<span>${post.comments}</span>
-        </button>
+        <a class="action-btn" href="#/posts/${post.id}" data-act="comment" aria-label="返信">
+          ${icon("comment", 18)}<span data-comment-count>${post.comments}</span>
+        </a>
+        ${post.isMine ? `
+          <button class="action-btn action-btn--end" type="button" data-act="delete" aria-label="投稿を削除">
+            ${icon("trash", 18)}<span class="action-btn__label">削除</span>
+          </button>` : ""}
       </footer>
     </article>
   `);
 
-  // いいねの切り替え（このブラウザの localStorage にだけ保存され、相手には届かない）
+  // いいね（サーバーに保存され、相手に通知が届く）。押した瞬間に見た目を変え、失敗したら戻す
   const likeBtn = card.querySelector('[data-act="like"]');
   let liked = post.liked;
   let count = post.likes;
-  likeBtn.addEventListener("click", () => {
-    liked = store.toggleLike(post.id, liked);
-    count += liked ? 1 : -1;
+  const drawLike = () => {
     likeBtn.classList.toggle("is-on", liked);
+    likeBtn.setAttribute("aria-pressed", String(liked));
     likeBtn.querySelector("[data-like-count]").textContent = Math.max(0, count);
+  };
+  likeBtn.addEventListener("click", async () => {
+    if (likeBtn.disabled) return;
+    const before = { liked, count };
+    liked = !liked;
+    count += liked ? 1 : -1;
+    drawLike();
+    likeBtn.disabled = true;
+    try {
+      ({ liked, likeCount: count } = await store.setLike(post.id, liked));
+    } catch (err) {
+      ({ liked, count } = before);
+      toast(err.message);
+    } finally {
+      likeBtn.disabled = false;
+      drawLike();
+    }
   });
 
-  card.querySelector('[data-act="comment"]').addEventListener("click", () => {
-    import("../utils.js").then(({ toast }) => toast("コメント機能は準備中です"));
+  // 詳細画面では、返信ボタンで返信欄へ移る
+  if (detail) {
+    card.querySelector('[data-act="comment"]').addEventListener("click", (e) => {
+      e.preventDefault();
+      document.querySelector("[data-reply-input]")?.focus();
+    });
+  }
+
+  // 削除（自分の投稿だけ。確かめてから消す）
+  card.querySelector('[data-act="delete"]')?.addEventListener("click", async () => {
+    const ok = await openModal({
+      title: "この投稿を削除しますか？",
+      okLabel: "削除する",
+      bodyHtml: `<p class="u-muted">「${esc(post.material.title)}」${esc(formatDuration(post.durationMin))}の学習記録を削除します。
+        ついたいいね・返信も消え、レポートの集計からも外れます。元に戻せません。</p>`,
+    });
+    if (!ok) return;
+    try {
+      await store.deletePost(post.id);
+    } catch (err) {
+      toast(`削除できませんでした：${err.message}`);
+      return;
+    }
+    toast("投稿を削除しました");
+    if (onDeleted) onDeleted();
+    else card.remove();
   });
 
   return card;
@@ -268,7 +322,7 @@ function renderGoalTab() {
     wrap.appendChild(el(`
       <article class="card">
         <header class="post__head">
-          <div class="avatar" style="background:${g.avatarColor}">${esc(g.initial)}</div>
+          ${avatarHtml(g)}
           <div>
             <div class="post__name">${esc(g.userName)}</div>
             <div class="post__time">${formatRelative(g.createdAt)}</div>

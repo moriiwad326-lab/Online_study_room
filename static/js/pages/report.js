@@ -14,6 +14,7 @@ import {
   createGoalChart,
 } from "../charts.js";
 import * as store from "../store.js";
+import { avatarHtml } from "./people.js";
 
 export const meta = {
   title: "レポート",
@@ -209,7 +210,7 @@ function renderMeTab(charts) {
       <section class="card">
         <div class="u-spread">
           <div class="u-row">
-            <div class="avatar" style="background:${me.avatarColor}">${esc(me.initial)}</div>
+            ${avatarHtml(me)}
             <div>
               <div class="u-bold">${esc(me.name)}</div>
               <div class="u-small u-weak">${esc([me.grade, me.prefecture].filter(Boolean).join("／"))}</div>

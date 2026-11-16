@@ -3,8 +3,7 @@
  *
  *  - data/mock.json を読み込む（記事・目標など、まだサーバーに無いもの）
  *  - ログイン中のユーザー（プロフィール込み）と、そのユーザーの教材・カテゴリ・学習記録を API から受け取って持つ
- *  - フォロー・通知・メッセージ・招待申請は、その都度 API を呼ぶ（画面ごとに最新を取りに行く）
- *  - いいねだけは localStorage にユーザーごとに保存する
+ *  - フォロー・通知・メッセージ・招待申請・いいね・返信は、その都度 API を呼ぶ（画面ごとに最新を取りに行く）
  *  - 画面側は store の関数だけを呼び、localStorage や API を直接触らない
  *
  * 学習記録は以前 localStorage に保存していた。ログイン時に残っていればサーバーへ一度だけ送り、
@@ -29,7 +28,6 @@ export const BADGES_EVENT = "onsta:badges";
 /** localStorage に保存する側の初期値 */
 const emptyLocal = {
   records: [],   // 以前の版で保存していた学習記録（サーバーへ移したら空になる）
-  likes: {},     // { 投稿ID: true } いいね状態
   createdAt: null,
 };
 
@@ -65,7 +63,9 @@ function loadLocal() {
     const parsed = JSON.parse(raw);
     // 以前は初回にモックのサンプル記録を入れていた。存在しない教材を指すので取り除く
     const records = (parsed.records || []).filter((r) => r.source !== "seed");
-    return { ...emptyLocal, ...parsed, records };
+    // いいねは ver1.1 からサーバーに保存する（このブラウザにだけあったいいねは使わない）
+    const { likes, ...rest } = parsed;
+    return { ...emptyLocal, ...rest, records };
   } catch (err) {
     // 壊れたデータが入っていても起動できるようにする
     console.warn("[store] localStorage の読み込みに失敗したので初期化します", err);
@@ -169,6 +169,25 @@ export async function saveProfile(profile) {
   if (!wasCompleted) await setUser(user);
   else currentUser = user;
   return user;
+}
+
+/** プロフィール画像を変える（dataUrl は data:image/jpeg;base64,...）。保存後のユーザーを返す */
+export async function uploadAvatar(dataUrl) {
+  const { user } = await api("PUT", "/api/me/avatar", { image: dataUrl });
+  currentUser = user;
+  return user;
+}
+
+/** プロフィール画像をやめて色の丸に戻す */
+export async function deleteAvatar() {
+  const { user } = await api("DELETE", "/api/me/avatar");
+  currentUser = user;
+  return user;
+}
+
+/** プロフィール画像の URL（設定していなければ null） */
+function avatarUrl(userId, version) {
+  return version ? `/api/users/${userId}/avatar?v=${version}` : null;
 }
 
 /* ============ 教材・カテゴリ ============ */
@@ -287,7 +306,7 @@ export function getRecords() {
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
-/** 自分の学習記録（サーバー）といいね（localStorage）を全部消す */
+/** 自分の学習記録（サーバー）を全部消す（いいね・返信も一緒に消える） */
 export async function resetData() {
   await api("DELETE", "/api/records");
   myRecords = [];
@@ -311,6 +330,7 @@ export function getMe() {
     name,
     initial: Array.from(name)[0] || "?",
     avatarColor: p.avatarColor || DEFAULT_AVATAR_COLOR,
+    avatarUrl: currentUser ? avatarUrl(currentUser.id, p.avatarVersion) : null,
     bio: p.bio || "",
     tags: p.tags || [],
     gender: p.gender || "",
@@ -335,6 +355,7 @@ export function toPerson(u) {
     name,
     initial: Array.from(name)[0] || "?",
     avatarColor: u.avatarColor || DEFAULT_AVATAR_COLOR,
+    avatarUrl: avatarUrl(u.id, u.avatarVersion),
     tags: u.tags || [],
   };
 }
@@ -381,15 +402,15 @@ function toPost(r) {
     userName: person.name,
     initial: person.initial,
     avatarColor: person.avatarColor,
+    avatarUrl: isMine ? getMe().avatarUrl : person.avatarUrl,
     createdAt: r.createdAt,
     // 自分の教材は手元の一覧から引く（カテゴリ名を変えたときなども最新になる）
     material: isMine && r.materialId != null ? getMaterial(r.materialId) : recordMaterial(r),
     durationMin: r.durationMin,
     memo: r.memo,
-    // いいねはまだこのブラウザの中だけ（相手には届かない）
-    likes: local.likes[r.id] ? 1 : 0,
-    comments: 0,
-    liked: Boolean(local.likes[r.id]),
+    likes: r.likeCount ?? 0,
+    liked: Boolean(r.liked),
+    comments: r.replyCount ?? 0,
     avgLoc: r.avgLoc,
     locSeries: r.locSeries || [],
     isMine,
@@ -406,6 +427,50 @@ export async function getTimelinePosts() {
 export async function getUserPosts(userId) {
   const { records } = await api("GET", `/api/users/${userId}/records`);
   return records.map(toPost);
+}
+
+/** 投稿1件（投稿の詳細画面用）。消されていれば 404 の ApiError */
+export async function getPost(recordId) {
+  const { record } = await api("GET", `/api/records/${encodeURIComponent(recordId)}`);
+  return toPost(record);
+}
+
+/** 自分の投稿（学習記録）を消す。レポートの集計からも外す */
+export async function deletePost(recordId) {
+  await api("DELETE", `/api/records/${encodeURIComponent(recordId)}`);
+  myRecords = myRecords.filter((r) => String(r.id) !== String(recordId));
+}
+
+/* ============ いいね・返信 ============ */
+
+/** いいねする／やめる。{ likeCount, liked } を返す */
+export async function setLike(recordId, like) {
+  const path = `/api/records/${encodeURIComponent(recordId)}/like`;
+  return like ? api("PUT", path, {}) : api("DELETE", path);
+}
+
+/**
+ * 投稿への返信（古い順）。各要素：{ id, parentId, user(person|null), body, isDeleted, isMine, canDelete, createdAt }
+ * parentId で木にする（null は投稿への直接の返信）。
+ */
+export async function getReplies(recordId) {
+  const { replies } = await api("GET", `/api/records/${encodeURIComponent(recordId)}/replies`);
+  return replies.map(toReply);
+}
+
+/** 返信する（parentId を渡すとその返信への返信） */
+export async function addReply(recordId, body, parentId = null) {
+  const { reply } = await api("POST", `/api/records/${encodeURIComponent(recordId)}/replies`,
+    { body, parentId });
+  return toReply(reply);
+}
+
+export async function deleteReply(replyId) {
+  await api("DELETE", `/api/replies/${encodeURIComponent(replyId)}`);
+}
+
+function toReply(r) {
+  return { ...r, user: r.user ? toPerson(r.user) : null };
 }
 
 /* ============ いま勉強中 ============ */
@@ -438,16 +503,6 @@ export function endLive() {
   fetch("/api/live", { method: "DELETE", credentials: "same-origin", keepalive: true }).catch(() => {});
 }
 
-/* ============ 更新系 ============ */
-
-/** いいねのオン・オフを切り替え、切り替え後の状態を返す */
-export function toggleLike(postId, currentLiked) {
-  const next = !currentLiked;
-  local.likes[postId] = next;
-  saveLocal();
-  return next;
-}
-
 /* ============ ユーザー・フォロー ============ */
 
 export async function searchUsers(query) {
@@ -468,6 +523,12 @@ export async function getFollowers(userId) {
 
 export async function getFollowing(userId) {
   const { users } = await api("GET", `/api/users/${userId}/following`);
+  return users.map(toPerson);
+}
+
+/** 初回設定でフォローを勧める運営アカウント（見つからなければ空） */
+export async function getFeaturedUsers() {
+  const { users } = await api("GET", "/api/featured-users");
   return users.map(toPerson);
 }
 

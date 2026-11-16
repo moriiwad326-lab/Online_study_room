@@ -8,8 +8,15 @@
 import { esc, toast } from "../utils.js";
 import * as store from "../store.js";
 
-/** アイコン（ニックネームの1文字目を色の丸に載せる） */
+/**
+ * アイコン。プロフィール画像があれば画像、なければニックネームの1文字目を色の丸に載せる。
+ * person は { avatarColor, initial, avatarUrl? } を持つもの（store.getMe() / toPerson() / 投稿カード）。
+ */
 export function avatarHtml(person, extraClass = "") {
+  if (person.avatarUrl) {
+    return `<div class="avatar avatar--img ${extraClass}" style="background:${esc(person.avatarColor)}">
+      <img src="${esc(person.avatarUrl)}" alt="" loading="lazy" /></div>`;
+  }
   return `<div class="avatar ${extraClass}" style="background:${esc(person.avatarColor)}">${esc(person.initial)}</div>`;
 }
 

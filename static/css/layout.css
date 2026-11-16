@@ -47,6 +47,17 @@
   letter-spacing: .02em;
 }
 .logo__text span { color: var(--c-primary); }
+/* 版（ver1.1 など）。押すと更新情報へ */
+.logo__version {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--c-primary-light);
+  color: var(--c-primary-dark);
+  font-size: 11px;
+  font-weight: 700;
+}
+.logo__version:hover { text-decoration: underline; }
 
 /* サイドバー上部のプロフィール */
 .side-profile {
@@ -74,7 +85,10 @@
 .nav__item:hover { background: var(--c-primary-light); color: var(--c-primary-dark); }
 .nav__item.is-active { background: var(--c-primary-light); color: var(--c-primary-dark); }
 .nav__item svg { flex: 0 0 auto; }
+.nav__icon { display: inline-flex; flex: 0 0 auto; }
 .nav__label { flex: 1; }
+/* LoC計測（真ん中の項目）。PC では色で目立たせ、スマホでは丸い大きなボタンにする */
+.nav__item--primary { color: var(--c-primary); font-weight: 800; }
 
 /* サイドバー下部の記録ボタン */
 .side-cta {
@@ -231,15 +245,39 @@
     flex: 1;
     flex-direction: row;
     justify-content: space-around;
+    align-items: flex-end;
   }
   .nav__item {
+    flex: 1 1 0;
+    min-width: 0;
+    align-items: center;
     flex-direction: column;
     gap: 2px;
-    padding: 6px 4px;
+    padding: 6px 2px;
     font-size: 10px;
     border-radius: var(--radius-sm);
   }
+  .nav__label { flex: none; white-space: nowrap; }
   .nav__item.is-active { background: transparent; }
+  /* 管理は下部タブバーには出さない（真ん中の LoC計測がずれるので。プロフィールから開く） */
+  .nav__item--admin { display: none; }
+
+  /* 真ん中の LoC計測：バーから少し浮いた丸いボタン */
+  .nav__item--primary { color: var(--c-primary); }
+  .nav__item--primary .nav__icon {
+    width: 54px;
+    height: 54px;
+    margin-top: -26px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(135deg, var(--c-primary), #8a7cf0);
+    color: #fff;
+    border: 4px solid var(--c-surface);
+    box-shadow: 0 6px 16px rgba(91, 91, 214, .38);
+  }
+  .nav__item--primary:hover { background: transparent; }
+  .nav__item--primary.is-active .nav__icon { background: var(--c-primary-dark); }
 
   .page { padding: 14px 12px 80px; }
   .header__top { padding: 0 14px; }
@@ -257,6 +295,7 @@
   .side-cta .btn span { display: none; }
   .nav__item { justify-content: center; }
   .side-cta .btn { padding: 0; justify-content: center; }
+  .logo__version { display: none; }
 }
 
 /* ---------------- ログインまわりの全画面ページ ---------------- */

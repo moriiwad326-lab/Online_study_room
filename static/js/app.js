@@ -6,7 +6,11 @@
  *
  * 各ページは js/pages/*.js にあり、次の形を守っている：
  *   export const meta = { title, tabs? }        … ヘッダーに出す情報
- *   export async function render(ctx)           … { node, destroy? } を返す
+ *   export async function render(ctx)           … { node, destroy?, shouldConfirmLeave? } を返す
+ *
+ * shouldConfirmLeave() が true を返すあいだ（LoC計測中）は、別の画面へ移ろうとすると
+ * 「LoC計測を中断しますか？」と確かめる。ページを閉じる・再読み込みするときの確認は
+ * ブラウザの標準のダイアログになる（文言は変えられない）ので、そのページ側で beforeunload を使う。
  *
  * ログインまわりの画面（authRoutes）はサイドバー・ヘッダーなしの全画面で出す。
  * 未ログインなら #/login へ、プロフィール未設定（初回ログイン）なら #/setup へ寄せる。
@@ -14,9 +18,11 @@
  * ヘッダーの通知・メッセージの未読数は、ページを移るたびと BADGE_POLL_MS ごとにサーバーへ聞く。
  */
 
-import { $, el, esc } from "./utils.js";
+import { $, el, esc, openModal } from "./utils.js";
 import { icon } from "./icons.js";
 import * as store from "./store.js";
+import { APP_VERSION } from "./version.js";
+import { avatarHtml } from "./pages/people.js";
 
 import * as timelinePage from "./pages/timeline.js";
 import * as recordPage from "./pages/record.js";
@@ -29,6 +35,8 @@ import * as notificationsPage from "./pages/notifications.js";
 import * as messagesPage from "./pages/messages.js";
 import * as userPage from "./pages/user.js";
 import * as adminPage from "./pages/admin.js";
+import * as postPage from "./pages/post.js";
+import * as helpPage from "./pages/help.js";
 
 /** 未読数を聞き直す間隔（ms） */
 const BADGE_POLL_MS = 30000;
@@ -44,6 +52,8 @@ const routes = {
   messages: messagesPage,
   users: userPage,
   admin: adminPage,
+  posts: postPage,
+  help: helpPage,
 };
 
 /** サイドバー・ヘッダーを出さない全画面のページ */
@@ -52,20 +62,27 @@ const authRoutes = {
   setup: setupPage,
 };
 
-/** サイドバーに並べる項目 */
+/**
+ * サイドバー（スマホでは下部タブバー）に並べる項目。
+ * LoC計測は真ん中に置き、スマホでは丸い大きなボタンで目立たせる（primary）。
+ */
 const navItems = [
   { route: "timeline", label: "タイムライン", icon: "timeline" },
-  { route: "record",   label: "記録する",     icon: "record" },
   { route: "report",   label: "レポート",     icon: "report" },
+  { route: "record",   label: "LoC計測",      icon: "loc", primary: true },
   { route: "search",   label: "さがす",       icon: "search" },
   { route: "profile",  label: "もっと見る",   icon: "more" },
 ];
 
 /** 管理者にだけ出す項目 */
-const adminNavItem = { route: "admin", label: "管理", icon: "lock" };
+const adminNavItem = { route: "admin", label: "管理", icon: "lock", className: "nav__item--admin" };
 
 /** 今表示しているページの後片付け関数（タイマー解除など） */
 let currentDestroy = null;
+/** 今表示しているページの「離れる前に確かめるか」（LoC計測中なら true を返す） */
+let currentLeaveGuard = null;
+/** 今表示しているページのハッシュ（移動を取りやめたときに戻す先） */
+let currentHash = "";
 
 /* ============ ハッシュの解析 ============ */
 
@@ -101,24 +118,25 @@ function renderSidebar(activeRoute) {
     <div class="logo">
       <div class="logo__mark">O</div>
       <div class="logo__text">On<span>sta</span></div>
+      <a class="logo__version" href="#/help?tab=updates" title="更新情報">ver${APP_VERSION}</a>
     </div>
 
     <a class="side-profile" href="#/profile">
-      <div class="avatar avatar--sm" style="background:${me.avatarColor}">${esc(me.initial)}</div>
+      ${avatarHtml(me, "avatar--sm")}
       <div class="side-profile__name">${esc(me.name)}</div>
     </a>
 
     <nav class="nav">
       ${items.map((item) => `
-        <a class="nav__item ${item.route === activeRoute ? "is-active" : ""}"
+        <a class="nav__item ${item.primary ? "nav__item--primary" : ""} ${item.className || ""} ${item.route === activeRoute ? "is-active" : ""}"
            href="#/${item.route}">
-          ${icon(item.icon, 21)}
+          <span class="nav__icon">${icon(item.icon, item.primary ? 24 : 21)}</span>
           <span class="nav__label">${item.label}</span>
         </a>`).join("")}
     </nav>
 
     <div class="side-cta">
-      <a class="btn btn--wide" href="#/record">${icon("plus", 18)}<span>記録する</span></a>
+      <a class="btn btn--wide" href="#/record">${icon("loc", 18)}<span>LoC計測</span></a>
     </div>
   `;
 
@@ -139,6 +157,9 @@ function renderHeader(page, ctx) {
     <div class="header__top">
       <h1 class="header__title">${page.meta?.title || "Onsta"}</h1>
       <div class="header__actions">
+        <button class="icon-btn" type="button" aria-label="LoC とは？" title="LoC とは？" data-act="help">
+          ${icon("help", 21)}
+        </button>
         <button class="icon-btn" type="button" aria-label="通知" data-act="notifications">
           ${icon("bell", 21)}<span data-badge="notifications"></span>
         </button>
@@ -193,8 +214,37 @@ function redirectFor(route) {
   return authRoutes[route] ? "#/timeline" : null;
 }
 
+/**
+ * ハッシュが変わったとき。LoC計測中なら URL をいったん元に戻して確かめ、
+ * 「中断して移動」なら移り、「計測を続ける」ならそのままにする。
+ */
+async function onHashChange() {
+  if (currentLeaveGuard?.() && location.hash !== currentHash) {
+    const target = location.hash;
+    // replaceState は hashchange を起こさないので、ここで router は動かない
+    history.replaceState(null, "", currentHash || "#/timeline");
+    if (!(await confirmLeaveMeasurement())) return;
+    currentLeaveGuard = null;
+    history.replaceState(null, "", target);
+  }
+  router();
+}
+
+/** 「LoC計測を中断しますか？」。中断して移るなら true */
+export function confirmLeaveMeasurement() {
+  return openModal({
+    title: "LoC計測を中断しますか？",
+    okLabel: "中断して移動",
+    cancelLabel: "計測を続ける",
+    bodyHtml: `<p class="u-muted">このページを離れると LoC計測は中断され、ここまでの計測は記録されません。<br>
+      記録するときは「終了して記録」を押してください。</p>`,
+  });
+}
+
 async function router() {
   const ctx = parseHash();
+  currentHash = location.hash;
+  currentLeaveGuard = null;
 
   // 前のページのタイマーやカメラを必ず止める
   if (currentDestroy) {
@@ -233,6 +283,7 @@ async function router() {
     const result = await page.render(context);
     pageRoot.appendChild(result.node);
     currentDestroy = result.destroy || null;
+    currentLeaveGuard = result.shouldConfirmLeave || null;
   } catch (err) {
     console.error("[app] ページの描画に失敗", err);
     pageRoot.appendChild(el(`<div class="notice notice--error">
@@ -264,7 +315,7 @@ async function boot() {
     return;
   }
 
-  window.addEventListener("hashchange", router);
+  window.addEventListener("hashchange", onHashChange);
   window.addEventListener(store.BADGES_EVENT, renderBadges);
   // 開いていないタブでは聞きに行かない
   setInterval(() => {

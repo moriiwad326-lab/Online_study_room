@@ -4,6 +4,9 @@
  *  新しい順に最大50件。開いたら全部既読にする（未読だったものは、この画面を開いている間は色付きのまま）。
  *  通知の種類：
  *    follow           … フォローされた
+ *    like             … 投稿にいいねされた
+ *    reply            … 投稿（または自分の返信）に返信された
+ *    announcement     … 運営からのお知らせ（Onsta の更新など）
  *    invite_request   … 招待申請が届いた（管理者だけ）
  *    invite_approved  … 紹介した友だちの招待申請が承認された
  *    invite_rejected  … 紹介した友だちの招待申請が見送られた
@@ -58,6 +61,25 @@ function describe(n) {
         href: n.actor ? `#/users/${n.actor.id}` : "#/notifications",
         iconHtml: n.actor ? avatarHtml(n.actor) : circle("user"),
         text: `<b>${esc(n.actor?.name ?? "退会したユーザー")}</b>さんにフォローされました`,
+      };
+    case "like":
+      return {
+        href: `#/posts/${n.data.recordId}`,
+        iconHtml: n.actor ? avatarHtml(n.actor) : circle("like"),
+        text: `<b>${esc(n.actor?.name ?? "退会したユーザー")}</b>さんからいいねされました`,
+      };
+    case "reply":
+      return {
+        href: `#/posts/${n.data.recordId}?reply=${n.data.replyId}`,
+        iconHtml: n.actor ? avatarHtml(n.actor) : circle("comment"),
+        text: `<b>${esc(n.actor?.name ?? "退会したユーザー")}</b>さんが${n.data.toReply ? "あなたの返信" : "あなたの投稿"}に返信しました`
+          + (n.data.snippet ? `<div class="notif__snippet">「${esc(n.data.snippet)}」</div>` : ""),
+      };
+    case "announcement":
+      return {
+        href: "#/help?tab=updates",
+        iconHtml: `<div class="notif__icon notif__icon--brand">O</div>`,
+        text: `<b>${esc(n.data.title || "Onsta からのお知らせ")}</b><div class="u-small u-muted">更新内容を見る &rarr;</div>`,
       };
     case "invite_request":
       return {
