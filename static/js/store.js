@@ -221,6 +221,36 @@ export async function deleteMaterial(materialId) {
   myMaterials = myMaterials.filter((m) => String(m.id) !== String(materialId));
 }
 
+/**
+ * ほかの人の教材を自分の教材に登録する（教材名・ISBN と、フォロー中の人の教材なら画像も写る）。
+ * 同じ名前の教材をもう持っていれば 409 の ApiError。
+ */
+export async function copyMaterial(materialId, categoryId) {
+  const { material } = await api("POST", `/api/materials/${encodeURIComponent(materialId)}/copy`, { categoryId });
+  myMaterials.push(material);
+  return toMaterial(material);
+}
+
+/** その人の教材（追加した順）。各要素に、自分が同じ名前の教材を持っていれば mine（自分の教材）が付く */
+export async function getUserMaterials(userId) {
+  const { materials } = await api("GET", `/api/users/${userId}/materials`);
+  return materials.map((m) => ({
+    id: String(m.id),
+    title: m.title,
+    isbn: m.isbn,
+    subjectName: m.categoryName || "その他",
+    color: m.color || UNKNOWN_COLOR,
+    imageUrl: m.hasImage ? `/api/materials/${m.id}/image?v=${m.imageVersion}` : null,
+    mine: findMyMaterialByTitle(m.title),
+  }));
+}
+
+/** 同じ名前の自分の教材（なければ null）。ほかの人の教材を登録済みか確かめるのに使う */
+export function findMyMaterialByTitle(title) {
+  const mine = myMaterials.find((m) => m.title === title);
+  return mine ? toMaterial(mine) : null;
+}
+
 /** バーコードの番号から書名・表紙を調べる。見つからなければ 404 の ApiError */
 export async function lookupBook(isbn) {
   const { book } = await api("GET", `/api/books/${encodeURIComponent(isbn)}`);
@@ -254,6 +284,7 @@ function recordMaterial(record) {
   return {
     id: String(m.id),
     title: m.title,
+    isbn: m.isbn || "",
     subjectId: "",
     subjectName: m.categoryName || "その他",
     color: m.color || UNKNOWN_COLOR,
@@ -283,8 +314,10 @@ async function reloadRecords() {
 }
 
 /**
- * 学習記録を1件追加する。計測終了時と手動記録の両方から呼ばれる。
- * @param {{materialId:string, durationMin:number, memo?:string, locSeries?:number[], source?:string}} input
+ * 学習記録を1件追加する。LoC計測の終了時と、記録の入力（手動入力・ストップウォッチ）から呼ばれる。
+ * @param {{materialId:string, durationMin:number, memo?:string, locSeries?:number[],
+ *          source?:"camera"|"stopwatch"|"manual", createdAt?:string}} input
+ *   createdAt は勉強した日時（ISO 文字列。省略するとサーバーの今）
  */
 export async function addRecord(input) {
   const { record } = await api("POST", "/api/records", {
@@ -293,6 +326,7 @@ export async function addRecord(input) {
     memo: input.memo || "",
     locSeries: (input.locSeries || []).map((v) => Math.round(v)),
     source: input.source || "manual",
+    ...(input.createdAt ? { createdAt: input.createdAt } : {}),
   });
   const saved = toRecord(record);
   myRecords.push(saved);

@@ -104,14 +104,18 @@ export function clampLoc(value) {
   return Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
 }
 
+/** LoC の色分けの境目（high は緑・mid は黄・low は赤）。help.js の「数値の目安」もこれで出す */
+export const LOC_HIGH_MIN = 50;
+export const LOC_MID_MIN = 30;
+
 /**
  * LoC を3段階に分類する。
- * high: 70以上 / mid: 40〜69 / low: 40未満
+ * high: 50以上 / mid: 30〜49 / low: 30未満
  */
 export function locLevel(loc) {
   const v = clampLoc(loc);
-  if (v >= 70) return "high";
-  if (v >= 40) return "mid";
+  if (v >= LOC_HIGH_MIN) return "high";
+  if (v >= LOC_MID_MIN) return "mid";
   return "low";
 }
 

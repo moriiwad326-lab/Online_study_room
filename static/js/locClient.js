@@ -2,7 +2,9 @@
  * locClient.js : LoC（集中度）を取得するクライアント
  *
  * 画面側は「LocClient を作って start() し、onLoc で値を受け取る」だけでよい。
- * 中身がモックでも本番の WebSocket でも、使い方は変わらない。
+ * 推論サーバーにつながらない・切れたときは onStatus に error が来る。モックの LoC は作らない
+ * （ver1.2 で廃止。画面は「接続できなかった」と出し、LoC なしで時間だけ計り続ける）。
+ * つなぎ直すときは restart() を呼ぶ。
  *
  * ── 本番サーバーとのやりとり（Python 側と合わせる） ───────────────
  *   接続先 : localhost で開いたとき … ws://localhost:8765/loc（推論サーバーに直接）
@@ -30,29 +32,13 @@ function defaultLocUrl() {
   return `${protocol === "https:" ? "wss" : "ws"}://${host}/loc`;
 }
 
-/**
- * ★ モック / 本番の切り替えはこの1行だけ ★
- *   "mock" … カメラ映像は送らず、ランダムウォークで LoC を作る
- *   "live" … WebSocket で推論サーバーに接続し、カメラフレームを送る
- */
+/** 推論サーバーとのやりとりの設定 */
 export const LOC_CONFIG = {
-  mode: "live",
-
-  // --- 本番モードの設定 ---
   url: defaultLocUrl(),   // 固定したいときは "ws://localhost:8765/loc" などを直接書く
   fps: 5,                 // 1秒あたり何枚フレームを送るか
   frameWidth: 640,        // 送信するJPEGの横幅（縦は映像の比率に合わせる）。小さいと手の検出が落ちる
   jpegQuality: 0.8,       // JPEG の品質（0〜1）。上げると精度は上がるが通信量も増える
   connectTimeoutMs: 4000, // これだけ待って繋がらなければ失敗とみなす
-
-  // --- モックモードの設定 ---
-  mockIntervalMs: 1000,   // 何ミリ秒ごとに LoC を返すか
-  mockStart: 60,          // 開始時の LoC
-  mockStep: 7,            // 1ステップで動く最大幅（大きいほどガタガタする）
-  mockCenter: 68,         // ランダムウォークが引き寄せられる中心値
-
-  // 接続に失敗したとき、自動でモックに切り替えるか
-  autoFallbackToMock: true,
 };
 
 /**
@@ -60,14 +46,12 @@ export const LOC_CONFIG = {
  *   idle       … 未接続
  *   connecting … 接続中
  *   live       … 推論サーバーに接続済み
- *   mock       … モックで動作中
- *   error      … 接続失敗・切断
+ *   error      … 接続失敗・切断（LoC は届かない）
  */
 export const LOC_STATUS = {
   IDLE: "idle",
   CONNECTING: "connecting",
   LIVE: "live",
-  MOCK: "mock",
   ERROR: "error",
 };
 
@@ -77,14 +61,13 @@ export class LocClient {
    * @param {(payload:{loc:number, timestamp:number})=>void} handlers.onLoc    LoC を受け取るたびに呼ばれる
    * @param {(status:string, detail?:string)=>void}          handlers.onStatus 接続状態が変わったときに呼ばれる
    * @param {(payload:{remaining:number, total:number, seconds:number})=>void} handlers.onWarmup
-   *        推論サーバーが最初の LoC を出せるようになるまでの進み具合（本番モードのみ）
+   *        推論サーバーが最初の LoC を出せるようになるまでの進み具合
    */
   constructor({ onLoc, onStatus, onWarmup } = {}) {
     this.onLoc = onLoc || (() => {});
     this.onStatus = onStatus || (() => {});
     this.onWarmup = onWarmup || (() => {});
 
-    this.mode = LOC_CONFIG.mode;
     this.status = LOC_STATUS.IDLE;
     this.paused = false;
 
@@ -92,8 +75,6 @@ export class LocClient {
     this._video = null;
     this._canvas = null;
     this._frameTimer = null;
-    this._mockTimer = null;
-    this._mockValue = LOC_CONFIG.mockStart;
     this._connectTimer = null;
   }
 
@@ -101,20 +82,15 @@ export class LocClient {
 
   /**
    * 計測を開始する。
-   * @param {{video?: HTMLVideoElement}} options 本番モードではカメラの video 要素が必要
+   * @param {{video?: HTMLVideoElement}} options カメラの video 要素
    */
   start({ video } = {}) {
     this._video = video || null;
     this.paused = false;
-
-    if (this.mode === "live") {
-      this._startLive();
-    } else {
-      this._startMock();
-    }
+    this._startLive();
   }
 
-  /** 一時停止（接続は保ったまま、フレーム送信とモック生成だけ止める） */
+  /** 一時停止（接続は保ったまま、フレーム送信だけ止める） */
   pause() {
     this.paused = true;
   }
@@ -125,12 +101,11 @@ export class LocClient {
   }
 
   /**
-   * 推論サーバーにつなぎ直して、最初から推定し直す（カメラを切り替えたときなど）。
+   * 推論サーバーにつなぎ直して、最初から推定し直す（カメラを切り替えたとき・接続が切れたあとの再接続）。
    * サーバーは新しい接続が来ると直近の映像の窓を捨てるので、別のカメラの映像が混ざらない。
-   * 一時停止の状態はそのまま。モックのときは何もしない。
+   * 一時停止の状態はそのまま。
    */
   restart() {
-    if (this.mode !== "live") return;
     const paused = this.paused;
     this.stop();
     this.start({ video: this._video });
@@ -140,9 +115,8 @@ export class LocClient {
   /** 計測を終了し、後片付けをする */
   stop() {
     clearInterval(this._frameTimer);
-    clearInterval(this._mockTimer);
     clearTimeout(this._connectTimer);
-    this._frameTimer = this._mockTimer = this._connectTimer = null;
+    this._frameTimer = this._connectTimer = null;
 
     if (this._ws) {
       // 切断時のエラーハンドラが走らないように外してから閉じる
@@ -154,48 +128,7 @@ export class LocClient {
     this._setStatus(LOC_STATUS.IDLE);
   }
 
-  /**
-   * 手動でモックに切り替える（接続エラー時の「モックで続ける」ボタン用）。
-   * 進行中の計測を止めずにそのまま続けられる。
-   */
-  switchToMock() {
-    clearInterval(this._frameTimer);
-    clearTimeout(this._connectTimer);
-    if (this._ws) {
-      this._ws.onclose = null;
-      this._ws.onerror = null;
-      try { this._ws.close(); } catch { /* 無視 */ }
-      this._ws = null;
-    }
-    this.mode = "mock";
-    this._startMock();
-  }
-
-  /* ============ モック実装 ============ */
-
-  /**
-   * ランダムウォークでなめらかな LoC を作る。
-   * 単純な乱数だと毎回跳ねてしまうので、
-   *   ・前回値からの差分を小さく保つ
-   *   ・中心値（mockCenter）へゆるやかに引き戻す
-   * の2点で「それっぽい」動きにしている。
-   */
-  _startMock() {
-    clearInterval(this._mockTimer);
-    this._setStatus(LOC_STATUS.MOCK);
-
-    this._mockTimer = setInterval(() => {
-      if (this.paused) return;
-
-      const drift = (LOC_CONFIG.mockCenter - this._mockValue) * 0.08; // 中心に戻る力
-      const noise = (Math.random() - 0.5) * 2 * LOC_CONFIG.mockStep;  // ゆらぎ
-      this._mockValue = clampLoc(this._mockValue + drift + noise);
-
-      this.onLoc({ loc: this._mockValue, timestamp: Date.now() });
-    }, LOC_CONFIG.mockIntervalMs);
-  }
-
-  /* ============ 本番（WebSocket）実装 ============ */
+  /* ============ WebSocket ============ */
 
   _startLive() {
     this._setStatus(LOC_STATUS.CONNECTING);
@@ -300,7 +233,7 @@ export class LocClient {
     return canvas.toDataURL("image/jpeg", LOC_CONFIG.jpegQuality).split(",")[1];
   }
 
-  /** 本番モードの失敗処理。設定に応じてモックへ自動フォールバックする。 */
+  /** 接続に失敗した・切れたとき。接続を片付けて error を知らせる（つなぎ直しは restart()） */
   _failLive(detail) {
     clearInterval(this._frameTimer);
     clearTimeout(this._connectTimer);
@@ -314,11 +247,6 @@ export class LocClient {
     }
 
     this._setStatus(LOC_STATUS.ERROR, detail);
-
-    if (LOC_CONFIG.autoFallbackToMock) {
-      this.mode = "mock";
-      this._startMock();
-    }
   }
 
   /* ============ 内部ユーティリティ ============ */
@@ -333,9 +261,8 @@ export class LocClient {
 export function statusLabel(status) {
   switch (status) {
     case LOC_STATUS.LIVE:       return "推論サーバー接続中";
-    case LOC_STATUS.MOCK:       return "モックで動作中";
     case LOC_STATUS.CONNECTING: return "接続しています…";
-    case LOC_STATUS.ERROR:      return "接続エラー";
+    case LOC_STATUS.ERROR:      return "推論サーバー未接続";
     default:                    return "待機中";
   }
 }

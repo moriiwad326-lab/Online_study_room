@@ -1,7 +1,7 @@
 /**
  * pages/profile.js : プロフィール（#/profile）、プロフィール編集（#/profile/edit）
  *
- *  登録教材数・フォロー数・基本情報・自己紹介・タグを表示する。
+ *  登録教材数・フォロー数・登録した教材（見る・追加する）・基本情報・自己紹介・タグを表示する。
  *  「友だちを招待」から友だちのメールアドレスを申請でき（管理者が承認すると招待される）、申請の結果も見られる。
  *  一番下に、ログアウトと保存データ（学習記録・いいね）を初期化するボタンを置いている。
  */
@@ -11,6 +11,7 @@ import { icon } from "../icons.js";
 import * as store from "../store.js";
 import { renderProfileForm } from "./profileForm.js";
 import { avatarHtml } from "./people.js";
+import { materialGridHtml } from "./materialSheet.js";
 
 export const meta = { title: "プロフィール" };
 
@@ -25,7 +26,8 @@ export async function render({ param, navigate }) {
 
   const me = store.getMe();
   const summary = store.getSummary();
-  const materialCount = store.getMaterials().length;
+  const materials = store.getMaterials();
+  const materialCount = materials.length;
   const thisYear = new Date().getFullYear();
 
   const node = el(`
@@ -34,7 +36,7 @@ export async function render({ param, navigate }) {
       <section class="card">
         <div class="profile-head">
           ${avatarHtml(me, "avatar--lg")}
-          <div>
+          <div class="profile-head__info">
             <div class="profile-head__name">${esc(me.name)}</div>
             <div class="u-small u-muted">${esc(joinSet([me.grade, me.targetSchool && `志望：${me.targetSchool}`]))}</div>
           </div>
@@ -48,10 +50,10 @@ export async function render({ param, navigate }) {
         </div>
 
         <div class="grid-3" style="margin-top:14px">
-          <div class="stat">
+          <a class="stat stat--link" href="#/profile" data-act="to-materials">
             <div class="stat__label">登録教材</div>
             <div class="stat__value tabular">${materialCount}<span class="stat__unit">冊</span></div>
-          </div>
+          </a>
           <div class="stat">
             <div class="stat__label">記録した回数</div>
             <div class="stat__value tabular">${summary.recordCount}<span class="stat__unit">回</span></div>
@@ -61,6 +63,18 @@ export async function render({ param, navigate }) {
             <div class="stat__value tabular">${formatDuration(summary.totalMin)}</div>
           </div>
         </div>
+      </section>
+
+      <!-- 登録した教材 -->
+      <section class="card" data-materials>
+        <div class="card__head-row">
+          <h2 class="card__title">登録した教材</h2>
+          <a class="btn btn--ghost btn--sm" href="#/record/add">${icon("plus", 16)}教材を追加</a>
+        </div>
+        ${materialCount
+          ? `<div class="profile-materials">${materialGridHtml(materials, { isMe: true })}</div>
+             <p class="u-small u-weak">教材を押すと LoC計測を始められます。ほかの人の教材は、その人のプロフィールの「教材」やタイムラインの投稿から登録できます。</p>`
+          : `<p class="u-weak">まだ教材がありません。参考書や問題集を追加すると、教材ごとに学習を記録できます。</p>`}
       </section>
 
       <!-- 自己紹介 -->
@@ -132,6 +146,12 @@ export async function render({ param, navigate }) {
       </section>
     </div>
   `);
+
+  // 「登録教材」の数を押したら、登録した教材の一覧へ
+  node.querySelector('[data-act="to-materials"]').addEventListener("click", (e) => {
+    e.preventDefault();
+    node.querySelector("[data-materials]").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
   // 保存データの初期化（確認してから消す）
   node.querySelector('[data-act="reset"]').addEventListener("click", async () => {

@@ -4,6 +4,8 @@
 - 教材は 教材名・カテゴリ・ISBN（バーコードで追加したときだけ）・画像 を持つ
 - 画像は DB に BLOB で保存し、`image_version` を上げて画面側のキャッシュを切り替える
   （受け付けるのは JPEG / PNG / WebP / GIF のみ。中身の先頭バイトで判定する）
+- ほかの人の教材は一覧で見られ、自分の教材として登録（コピー）できる。画像はフォロー中の人の教材のときだけ
+  見せ、コピーもする
 """
 
 from __future__ import annotations
@@ -177,6 +179,51 @@ class MaterialStore:
                 "SELECT id, category_id, title, isbn, image_type, image_version, created_at"
                 " FROM materials WHERE id = ?", (cur.lastrowid,)).fetchone()
         return self._material_json(row)
+
+    def list_public(self, owner_id: int, with_images: bool) -> List[Dict[str, Any]]:
+        """ほかの人に見せる、その人の教材（カテゴリ名・色つき。追加した順）。
+
+        with_images が False なら画像は無いものとして渡す（教材の画像はフォロー中の人にだけ見せる）。
+        """
+        with closing(connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT m.id, m.title, m.isbn, m.image_type, m.image_version, c.name AS c_name, c.color AS c_color"
+                " FROM materials m LEFT JOIN categories c ON c.id = m.category_id"
+                " WHERE m.user_id = ? ORDER BY m.id", (owner_id,)
+            ).fetchall()
+        return [{
+            "id": row["id"],
+            "title": row["title"],
+            "isbn": row["isbn"],
+            "categoryName": row["c_name"] or "",
+            "color": row["c_color"] or "",
+            "hasImage": with_images and bool(row["image_type"]),
+            "imageVersion": row["image_version"],
+        } for row in rows]
+
+    def copy_material(self, user_id: int, material_id: int, category_id: Any,
+                      with_image: bool) -> Dict[str, Any]:
+        """ほかの人の教材を、自分の教材として登録する（教材名・ISBN と、with_image なら画像も）。
+
+        同じ教材名の教材がもうあれば 409。
+        """
+        with closing(connect(self.db_path)) as conn:
+            source = conn.execute(
+                "SELECT user_id, title, isbn, image, image_type FROM materials WHERE id = ?",
+                (material_id,)).fetchone()
+            if not source:
+                raise AuthError(404, "教材が見つかりません")
+            if source["user_id"] == user_id:
+                raise AuthError(409, "自分の教材です")
+            duplicate = conn.execute(
+                "SELECT 1 FROM materials WHERE user_id = ? AND title = ?", (user_id, source["title"])
+            ).fetchone()
+            if duplicate:
+                raise AuthError(409, "同じ名前の教材がすでに登録されています")
+        image = None
+        if with_image and source["image_type"]:
+            image = (bytes(source["image"]), source["image_type"])
+        return self.add_material(user_id, source["title"], category_id, source["isbn"], image)
 
     def delete_material(self, user_id: int, material_id: int) -> None:
         with closing(connect(self.db_path)) as conn, conn:

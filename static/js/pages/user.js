@@ -1,9 +1,12 @@
 /**
- * pages/user.js : ユーザーページ（#/users/<ID>?tab=records|followers|following）
+ * pages/user.js : ユーザーページ（#/users/<ID>?tab=records|materials|followers|following）
  *
  *  公開プロフィール（ニックネーム・自己紹介・タグ・学年・志望・目標）、フォロー数、
  *  フォローボタン、相互フォローならメッセージへの入口を出す。
- *  タブで、その人の学習記録・フォロワー・フォロー中を切り替える。
+ *  タブで、その人の学習記録・教材・フォロワー・フォロー中を切り替える。
+ *  教材タブからは、その人の教材を自分の教材に登録できる（materialSheet.js）。
+ *
+ *  スマホ幅では、フォロー・メッセージのボタンを名前の下の段に回す（.profile-head__actions）。
  */
 
 import { el, esc } from "../utils.js";
@@ -11,11 +14,13 @@ import { icon } from "../icons.js";
 import * as store from "../store.js";
 import { renderPostCard, drawSparklines } from "./timeline.js";
 import { avatarHtml, personSubline, followButtonHtml, personRowHtml, bindFollowButtons } from "./people.js";
+import { materialGridHtml, bindMaterialGrid, emptyMaterialsNode } from "./materialSheet.js";
 
 export const meta = {
   title: "ユーザー",
   tabs: [
     { key: "records", label: "記録" },
+    { key: "materials", label: "教材" },
     { key: "followers", label: "フォロワー" },
     { key: "following", label: "フォロー中" },
   ],
@@ -44,13 +49,13 @@ export async function render({ param, tab, navigate }) {
     head.innerHTML = `
       <div class="profile-head">
         ${avatarHtml(person, "avatar--lg")}
-        <div>
+        <div class="profile-head__info">
           <div class="profile-head__name">${esc(person.name)}</div>
           ${sub ? `<div class="u-small u-muted">${esc(sub)}</div>` : ""}
           ${person.examName ? `<div class="u-small u-muted">目標：${esc(person.examName)}</div>` : ""}
-          ${person.followsMe && !person.isMe ? '<span class="chip">フォローされています</span>' : ""}
+          ${person.followsMe && !person.isMe ? '<span class="chip chip--block">フォローされています</span>' : ""}
         </div>
-        <div class="profile-head__edit u-row">
+        <div class="profile-head__actions">
           ${person.isMe
             ? `<a class="btn btn--ghost btn--sm" href="#/profile/edit">${icon("edit", 16)}編集</a>`
             : `${person.canMessage ? `<a class="btn btn--ghost btn--sm" href="#/messages/${person.id}">${icon("message", 16)}メッセージ</a>` : ""}
@@ -86,6 +91,19 @@ export async function render({ param, tab, navigate }) {
         ? el(`<div class="card">${people.map(personRowHtml).join("")}</div>`)
         : el(`<div class="empty">${tab === "followers" ? "まだフォロワーがいません" : "まだ誰もフォローしていません"}</div>`));
       bindFollowButtons(body);
+    } else if (tab === "materials") {
+      const materials = person.isMe ? store.getMaterials() : await store.getUserMaterials(userId);
+      if (materials.length === 0) {
+        body.appendChild(emptyMaterialsNode(person.isMe));
+      } else {
+        if (!person.isMe) {
+          body.appendChild(el(`<p class="u-small u-muted" style="margin-bottom:12px">
+            教材を押すと、自分の教材に登録できます。</p>`));
+        }
+        const grid = el(`<div>${materialGridHtml(materials, { isMe: person.isMe })}</div>`);
+        body.appendChild(grid);
+        if (!person.isMe) bindMaterialGrid(grid, materials, person);
+      }
     } else {
       const posts = await store.getUserPosts(userId);
       if (posts.length === 0) {

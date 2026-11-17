@@ -2,6 +2,8 @@
 
 - 以前はブラウザの localStorage にだけ保存していた。フォロー中の人のタイムラインに出すため、サーバーに置く
 - 教材は materials を指す。教材を消しても記録は残り、画面では「削除した教材」と出す
+- 記録の種類（source）は camera（LoC計測）・stopwatch（ストップウォッチ）・manual（手動入力）。
+  手動入力・ストップウォッチでは勉強した日時（createdAt）を選べる（未来は不可）
 - タイムラインには、自分とフォロー中の人の記録を新しい順に並べる。
   フォローは承認なしなので、記録はログインしている誰からでも見えるものとして扱う
 - localStorage に残っている記録は、ブラウザが一度だけ `import_records` で送ってくる。
@@ -32,7 +34,10 @@ MAX_CLIENT_ID_LEN = 64
 MAX_IMPORT = 2000
 TIMELINE_LIMIT = 100
 USER_RECORDS_LIMIT = 50
-SOURCES = ("manual", "camera")
+SOURCES = ("manual", "stopwatch", "camera")
+# 手動入力で日時を選ぶとき、端末の時計がこれだけ進んでいても受け付ける（秒）
+CLOCK_SKEW_SEC = 5 * 60
+MIN_YEAR = 2000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS study_records (
@@ -55,7 +60,7 @@ CREATE INDEX IF NOT EXISTS study_records_user ON study_records(user_id, created_
 SELECT_RECORDS = """
 SELECT r.id, r.user_id, r.material_id, r.duration_min, r.memo, r.loc_series, r.avg_loc,
        r.source, r.created_at,
-       m.id AS m_id, m.title AS m_title, m.image_type AS m_image_type,
+       m.id AS m_id, m.title AS m_title, m.isbn AS m_isbn, m.image_type AS m_image_type,
        m.image_version AS m_image_version, c.name AS c_name, c.color AS c_color,
        u.profile AS u_profile
 FROM study_records r
@@ -69,8 +74,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_created_at(value: Any) -> str:
-    """取り込む記録の日時。ISO 8601 を UTC にそろえる。未来の日時は受け付けない。"""
+def _parse_created_at(value: Any, skew_sec: int = 0) -> str:
+    """記録の日時。ISO 8601 を UTC にそろえる。未来の日時は受け付けない。
+
+    skew_sec 秒までの未来は、端末の時計のずれとみなして今にする。
+    """
     if not isinstance(value, str):
         raise AuthError(400, "記録の日時が正しくありません", "createdAt")
     try:
@@ -80,7 +88,12 @@ def _parse_created_at(value: Any) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     parsed = parsed.astimezone(timezone.utc)
-    if parsed > datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    if parsed > now:
+        if (parsed - now).total_seconds() > skew_sec:
+            raise AuthError(400, "未来の日時では記録できません", "createdAt")
+        parsed = now
+    if parsed.year < MIN_YEAR:
         raise AuthError(400, "記録の日時が正しくありません", "createdAt")
     return parsed.isoformat()
 
@@ -150,10 +163,13 @@ class RecordStore:
 
     def add_record(self, user_id: int, data: Any) -> Dict[str, Any]:
         record = normalize_record(data)
+        # 手動入力では、勉強した日時を選べる（省略なら今）
+        raw_created = data.get("createdAt")
+        created_at = _now() if raw_created in (None, "") else _parse_created_at(raw_created, CLOCK_SKEW_SEC)
         with closing(self._connect()) as conn, conn:
             if not self._owns_material(conn, user_id, record["material_id"]):
                 raise AuthError(400, "教材を選んでください", "materialId")
-            record_id = self._insert(conn, user_id, record, None, _now())
+            record_id = self._insert(conn, user_id, record, None, created_at)
         return self._get(record_id)
 
     def import_records(self, user_id: int, items: Any) -> Dict[str, int]:
@@ -278,6 +294,7 @@ class RecordStore:
             material = {
                 "id": row["m_id"],
                 "title": row["m_title"],
+                "isbn": row["m_isbn"],
                 "categoryName": row["c_name"] or "",
                 "color": row["c_color"] or "",
                 "hasImage": bool(row["m_image_type"]),

@@ -6,6 +6,8 @@
  *  - 自分とフォロー中の人の学習記録を投稿カードとして並べ、平均LoC とスパークラインを添える
  *    （投稿カードは user.js のユーザーページと post.js の投稿の詳細でも使う）
  *  - 投稿カードからいいね（相手に通知が届く）・返信（投稿の詳細へ）・削除（自分の投稿だけ）ができる
+ *  - 投稿の教材（表紙・教材名）を押すと、ほかの人の教材なら詳細が開き、自分の教材に登録できる
+ *    （materialSheet.js）。自分の教材なら LoC計測の画面へ
  */
 
 import { el, esc, formatRelative, formatDuration, formatClock, locLevelClass, thumbHtml, toast, openModal } from "../utils.js";
@@ -13,6 +15,7 @@ import { icon } from "../icons.js";
 import { gaugeHtml, updateGauge, drawSparkline } from "../charts.js";
 import * as store from "../store.js";
 import { avatarHtml } from "./people.js";
+import { openMaterialSheet } from "./materialSheet.js";
 
 /** 「いま勉強中」をサーバーに聞き直す間隔（ms）。計測画面が送ってくるのも約5秒ごと */
 const LIVE_POLL_MS = 5000;
@@ -214,10 +217,15 @@ export function renderPostCard(post, { detail = false, onDeleted } = {}) {
       </a>
 
       <div class="post__body">
-        <!-- 教材サムネイル：画像が無ければ科目色のプレースホルダで表す -->
-        ${thumbHtml(post.material)}
+        <!-- 教材サムネイル：画像が無ければ科目色のプレースホルダで表す。押すと教材の詳細へ -->
+        ${post.material.missing ? thumbHtml(post.material) : `
+          <button class="post__thumb-btn" type="button" data-act="material" aria-label="教材「${esc(post.material.title)}」を見る">
+            ${thumbHtml(post.material)}
+          </button>`}
         <div class="post__info">
-          <div class="post__material">${esc(post.material.title)}</div>
+          ${post.material.missing
+            ? `<div class="post__material">${esc(post.material.title)}</div>`
+            : `<button class="post__material post__material-btn" type="button" data-act="material">${esc(post.material.title)}</button>`}
           <div class="u-small u-weak">${esc(post.material.subjectName)}</div>
           <div class="post__duration tabular">${formatDuration(post.durationMin)}</div>
           ${post.memo ? `<div class="post__memo">${esc(post.memo)}</div>` : ""}
@@ -275,6 +283,15 @@ export function renderPostCard(post, { detail = false, onDeleted } = {}) {
       drawLike();
     }
   });
+
+  // 教材：自分の教材なら LoC計測へ、ほかの人の教材なら詳細（自分の教材に登録できる）
+  card.querySelectorAll('[data-act="material"]').forEach((btn) => btn.addEventListener("click", () => {
+    if (post.isMine) {
+      location.hash = `#/record/${post.material.id}`;
+      return;
+    }
+    openMaterialSheet(post.material, { id: post.userId, name: post.userName });
+  }));
 
   // 詳細画面では、返信ボタンで返信欄へ移る
   if (detail) {

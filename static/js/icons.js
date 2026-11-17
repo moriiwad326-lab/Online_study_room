@@ -151,6 +151,18 @@ export const icons = {
     <rect x="3" y="4" width="18" height="16" rx="2"/>
     <circle cx="9" cy="10" r="1.8"/>
     <path d="m21 16-5-5-9 9"/>`, s),
+
+  /* --- 記録の入力（ver1.2） --- */
+  close: (s) => svg(`<path d="M6 6l12 12M18 6 6 18"/>`, s),
+  calendar: (s) => svg(`
+    <rect x="3.5" y="5" width="17" height="15" rx="2"/>
+    <path d="M3.5 10h17M8 3v4M16 3v4"/>
+    <path d="M8 14h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01" stroke-width="2.4"/>`, s),
+  chevronRight: (s) => svg(`<path d="m9 6 6 6-6 6"/>`, s),
+  memo: (s) => svg(`
+    <rect x="4.5" y="3.5" width="15" height="17" rx="2"/>
+    <path d="M8 8h8M8 12h8M8 16h5"/>`, s),
+  check: (s) => svg(`<path d="m5 12.5 4.5 4.5L19 7.5"/>`, s),
 };
 
 /** 名前でアイコンを取り出す（未定義なら空文字） */

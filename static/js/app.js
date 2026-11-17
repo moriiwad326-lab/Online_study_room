@@ -12,7 +12,7 @@
  * 「LoC計測を中断しますか？」と確かめる。ページを閉じる・再読み込みするときの確認は
  * ブラウザの標準のダイアログになる（文言は変えられない）ので、そのページ側で beforeunload を使う。
  *
- * ログインまわりの画面（authRoutes）はサイドバー・ヘッダーなしの全画面で出す。
+ * ログインまわりの画面（authRoutes）と記録の入力（fullRoutes）はサイドバー・ヘッダーなしの全画面で出す。
  * 未ログインなら #/login へ、プロフィール未設定（初回ログイン）なら #/setup へ寄せる。
  *
  * ヘッダーの通知・メッセージの未読数は、ページを移るたびと BADGE_POLL_MS ごとにサーバーへ聞く。
@@ -37,6 +37,7 @@ import * as userPage from "./pages/user.js";
 import * as adminPage from "./pages/admin.js";
 import * as postPage from "./pages/post.js";
 import * as helpPage from "./pages/help.js";
+import * as inputPage from "./pages/input.js";
 
 /** 未読数を聞き直す間隔（ms） */
 const BADGE_POLL_MS = 30000;
@@ -56,10 +57,15 @@ const routes = {
   help: helpPage,
 };
 
-/** サイドバー・ヘッダーを出さない全画面のページ */
+/** サイドバー・ヘッダーを出さない全画面のページ（ログインまわり） */
 const authRoutes = {
   login: loginPage,
   setup: setupPage,
+};
+
+/** サイドバー・ヘッダーを出さない全画面のページ（ログインが要る。記録の入力） */
+const fullRoutes = {
+  input: inputPage,
 };
 
 /**
@@ -246,6 +252,9 @@ async function router() {
   currentHash = location.hash;
   currentLeaveGuard = null;
 
+  // 開いたままのモーダル（教材の詳細など）は前のページのものなので、キャンセル扱いで閉じる
+  document.querySelectorAll('#modal-root [data-act="cancel"]').forEach((btn) => btn.click());
+
   // 前のページのタイマーやカメラを必ず止める
   if (currentDestroy) {
     try { currentDestroy(); } catch (err) { console.warn("[app] 後片付けに失敗", err); }
@@ -260,10 +269,12 @@ async function router() {
   }
 
   const isAuthPage = Boolean(authRoutes[ctx.route]);
-  const page = authRoutes[ctx.route] || routes[ctx.route] || routes.timeline;
+  const isFullPage = isAuthPage || Boolean(fullRoutes[ctx.route]);
+  const page = authRoutes[ctx.route] || fullRoutes[ctx.route] || routes[ctx.route] || routes.timeline;
   document.body.classList.toggle("is-auth", isAuthPage);
+  document.body.classList.toggle("is-full", isFullPage && !isAuthPage);
 
-  if (isAuthPage) {
+  if (isFullPage) {
     $("#sidebar").innerHTML = "";
     $("#header").innerHTML = "";
   } else {

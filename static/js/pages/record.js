@@ -3,20 +3,25 @@
  *
  *  #/record            … カテゴリごとの教材カード一覧＋教材の追加・新規記録ボタン
  *  #/record/add        … 教材を追加（バーコード／独自教材。pages/materialAdd.js）
- *  #/record/<教材ID>   … LoC計測モード（カメラ＋リアルタイムLoC）と手動記録
+ *  #/record/<教材ID>   … LoC計測モード（カメラ＋リアルタイムLoC）
+ *  カメラを使わない記録（ストップウォッチ・手動入力）は #/input（pages/input.js）
  *
  *  教材は最初は1冊もなく、ユーザーが自分で追加する。
  *
  *  計測中に別の画面へ移ろうとすると、app.js が「LoC計測を中断しますか？」と確かめる（shouldConfirmLeave）。
  *  ページを閉じる・再読み込みするときは beforeunload でブラウザ標準の確認を出す。
+ *
+ *  推論サーバーにつながらない・切れたときは、その旨を出して LoC なしで時間だけ計り続ける
+ *  （「再接続」でつなぎ直せる）。LoC が1つも届かなかった計測は LoC なしの記録になる。
  */
 
 import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average, thumbHtml } from "../utils.js";
 import { icon } from "../icons.js";
 import { createRealtimeLocChart } from "../charts.js";
-import { LocClient, LOC_CONFIG, LOC_STATUS, statusLabel } from "../locClient.js";
+import { LocClient, LOC_STATUS, statusLabel } from "../locClient.js";
 import * as store from "../store.js";
 import { renderAdd } from "./materialAdd.js";
+import { stopwatchBannerHtml } from "./input.js";
 
 export const meta = { title: "LoC計測" };
 
@@ -145,6 +150,9 @@ function renderList(ctx) {
       </div>
     </div>
   `);
+  // ストップウォッチが動いていれば、記録の入力に戻る入口を一番上に出す
+  const banner = stopwatchBannerHtml();
+  if (banner) node.prepend(el(banner));
 
   // 教材がまだ無いときは追加の案内だけを出す
   if (count === 0) {
@@ -189,68 +197,10 @@ function renderList(ctx) {
     node.appendChild(section);
   });
 
-  // 右下のフローティングボタン（教材を選ばずに手入力で記録する）
-  const fab = el(`<button class="fab" type="button">${icon("plus", 20)}新規記録</button>`);
-  fab.addEventListener("click", () => openManualRecordModal());
-  node.appendChild(fab);
+  // 右下のフローティングボタン（カメラを使わずにストップウォッチ・手動入力で記録する）
+  node.appendChild(el(`<a class="fab" href="#/input">${icon("clock", 20)}記録の入力</a>`));
 
   return { node };
-}
-
-/**
- * 手動で学習記録を追加するモーダル。
- * カメラが使えない環境でも記録できるようにするための入口でもある。
- */
-async function openManualRecordModal(defaultMaterialId = null) {
-  const materials = store.getMaterials();
-
-  const bodyHtml = `
-    <div class="field">
-      <label class="field__label" for="mr-material">教材</label>
-      <select class="select" id="mr-material">
-        ${materials.map((m) => `
-          <option value="${m.id}" ${m.id === defaultMaterialId ? "selected" : ""}>
-            ${esc(m.subjectName)}／${esc(m.title)}
-          </option>`).join("")}
-      </select>
-    </div>
-    <div class="field">
-      <label class="field__label" for="mr-minutes">学習時間（分）</label>
-      <input class="input" id="mr-minutes" type="number" min="1" max="1440" value="30">
-    </div>
-    <div class="field">
-      <label class="field__label" for="mr-memo">メモ（任意）</label>
-      <textarea class="textarea" id="mr-memo" maxlength="200" placeholder="今日やったこと、気づいたことなど"></textarea>
-    </div>
-    <p class="u-small u-weak">この記録には LoC は付きません（カメラ計測なしのため）。</p>
-  `;
-
-  let values = null;
-  const ok = await openModal({
-    title: "学習記録を追加",
-    bodyHtml,
-    okLabel: "保存する",
-    onMount(root) {
-      // OK を押した時点の入力値を拾えるよう、閉じる前に読み取っておく
-      root.querySelector('[data-act="ok"]').addEventListener("click", () => {
-        values = {
-          materialId: root.querySelector("#mr-material").value,
-          durationMin: Number(root.querySelector("#mr-minutes").value),
-          memo: root.querySelector("#mr-memo").value.trim(),
-        };
-      });
-    },
-  });
-
-  if (!ok || !values || !values.durationMin) return;
-  try {
-    await store.addRecord({ ...values, source: "manual" });
-  } catch (err) {
-    toast(`記録を保存できませんでした：${err.message}`);
-    return;
-  }
-  toast("記録を保存しました");
-  location.hash = "#/timeline";
 }
 
 /* =========================================================
@@ -294,8 +244,8 @@ function renderMeasure(ctx) {
           Webカメラで手の動きをとらえ、集中度（LoC：0〜100）をリアルタイムに推定します。
         </p>
         <div class="notice" style="margin-bottom:12px">
-          <strong>計測中の映像は録画・保存されます。</strong><br>
-          カメラの映像は LoC 推論サーバーに送られ、推定した LoC と一緒に動画として保存されます（集中度推定の改善に使います）。
+          <strong>計測中の映像はデータとして保存されます。</strong><br>
+          LoC推論AIの学習用データとして保存されます。
           第三者への提供は行いません。計測はいつでも停止できます。
         </div>
         <label class="checkbox" style="margin-bottom:12px">
@@ -314,7 +264,7 @@ function renderMeasure(ctx) {
         </p>
         <div class="u-row" style="flex-wrap:wrap">
           <button class="btn" type="button" data-act="start" disabled>${icon("camera", 18)}LoC計測を開始</button>
-          <button class="btn btn--ghost" type="button" data-act="manual">${icon("clock", 18)}カメラを使わず記録</button>
+          <a class="btn btn--ghost" href="#/input/${material.id}">${icon("clock", 18)}カメラを使わず記録</a>
         </div>
         <div data-intro-error style="margin-top:12px"></div>
       </section>
@@ -383,8 +333,8 @@ function renderMeasure(ctx) {
     chart: null,        // リアルタイム折れ線
     timer: null,        // 1秒ごとのタイマー
     locStatus: null,    // LocClient の接続状態（LOC_STATUS）
-    liveLoc: null,      // 推論サーバーから受け取った直近の LoC（モックの値は入れない）
-    liveRecent: [],     // フォロワーに見せる直近の LoC（推論サーバーの値だけ。最大 LIVE_RECENT_MAX 点）
+    liveLoc: null,      // 推論サーバーから受け取った直近の LoC（切れたら null に戻す）
+    liveRecent: [],     // フォロワーに見せる直近の LoC（最大 LIVE_RECENT_MAX 点）
     liveTimer: null,    // 「いま勉強中」を送るタイマー
   };
 
@@ -441,9 +391,6 @@ function renderMeasure(ctx) {
     renderSwitchLabel();
   }
 
-  /* ---- カメラを使わずに記録 ---- */
-  q('[data-act="manual"]').addEventListener("click", () => openManualRecordModal(material.id));
-
   /* ---- 教材の削除（学習記録は残し、教材名は「削除した教材」になる） ---- */
   q('[data-act="delete-material"]').addEventListener("click", async () => {
     const ok = await openModal({
@@ -494,7 +441,7 @@ function renderMeasure(ctx) {
     // 3) リアルタイムグラフを用意する（直近5分ぶん＝1秒×300点）
     state.chart = createRealtimeLocChart(q("[data-loc-chart]"), { maxPoints: 300, overlay: true });
 
-    // 4) LoC の取得を開始する（モック／本番は locClient.js の LOC_CONFIG.mode で決まる）
+    // 4) 推論サーバーにつないで LoC の取得を始める（つながらなくても時間は計り続ける）
     state.client = new LocClient({
       onLoc: ({ loc }) => {
         if (state.paused) return;
@@ -511,12 +458,10 @@ function renderMeasure(ctx) {
         locNum.className = `stage__loc-num loc-color tabular ${locLevelClass(v)}`;
         state.chart.push(v, formatClock(state.totalSec));
 
-        // フォロワーには推論サーバーの本物の LoC だけを見せる（モックの値は送らない）
-        if (state.locStatus === LOC_STATUS.LIVE) {
-          state.liveLoc = v;
-          state.liveRecent.push(v);
-          if (state.liveRecent.length > LIVE_RECENT_MAX) state.liveRecent.shift();
-        }
+        // フォロワーの「いま勉強中」に見せる LoC
+        state.liveLoc = v;
+        state.liveRecent.push(v);
+        if (state.liveRecent.length > LIVE_RECENT_MAX) state.liveRecent.shift();
       },
       onStatus: (status, detail) => updateStatus(status, detail),
       // 推論サーバーは直近の映像が一定量たまるまで LoC を出せないので、その間の進み具合を出す
@@ -575,16 +520,17 @@ function renderMeasure(ctx) {
   /** 「いま勉強中」に出す今の状態を送る（失敗しても計測は続ける） */
   function sendLive() {
     if (!state.running) return;
-    const usingMock = state.locStatus === LOC_STATUS.MOCK || state.locStatus === LOC_STATUS.ERROR;
+    // 推論サーバーにつながっていないあいだは LoC なし（タイムラインには「LoC計測なし」と出る）
+    const noLoc = state.locStatus !== LOC_STATUS.LIVE;
     let status = "studying";
     if (state.paused || state.autoPaused) status = "paused";
-    else if (!usingMock && state.liveLoc === null) status = "warmup";
+    else if (!noLoc && state.liveLoc === null) status = "warmup";
     store.updateLive({
       materialId: Number(material.id),
       status,
       elapsedSec: state.elapsedSec,
-      loc: usingMock ? null : state.liveLoc,
-      recent: usingMock ? [] : state.liveRecent,
+      loc: noLoc ? null : state.liveLoc,
+      recent: noLoc ? [] : state.liveRecent,
     }).catch((err) => console.warn("[record] いま勉強中の状態を送れませんでした", err));
   }
 
@@ -673,7 +619,7 @@ function renderMeasure(ctx) {
         <div class="info-list" style="margin-bottom:12px">
           <div class="info-list__row"><span class="info-list__key">教材</span><span>${esc(material.title)}</span></div>
           <div class="info-list__row"><span class="info-list__key">学習時間</span><span>${formatDuration(durationMin)}</span></div>
-          <div class="info-list__row"><span class="info-list__key">平均LoC</span><span>${avgLoc ?? "計測なし"}</span></div>
+          <div class="info-list__row"><span class="info-list__key">平均LoC</span><span>${avgLoc ?? "なし（推論サーバーに接続できなかったため）"}</span></div>
         </div>
         <div class="field">
           <label class="field__label" for="fin-memo">メモ（任意）</label>
@@ -720,27 +666,31 @@ function renderMeasure(ctx) {
     statusEl.textContent = statusLabel(status);
     statusEl.className = "status";
     if (status === LOC_STATUS.LIVE) statusEl.classList.add("status--live");
-    if (status === LOC_STATUS.MOCK) statusEl.classList.add("status--mock");
     if (status === LOC_STATUS.ERROR) statusEl.classList.add("status--error");
     if (status !== LOC_STATUS.LIVE) warmupEl.classList.add("u-hidden");
 
     const box = q("[data-measure-error]");
     if (status === LOC_STATUS.ERROR) {
+      // 届かなくなった LoC を出し続けない（自動一時停止の判定にも使わない）
+      state.lastLoc = null;
+      state.liveLoc = null;
+      state.liveRecent = [];
+      locNum.textContent = "--";
+      locNum.className = "stage__loc-num loc-color is-loc-mid tabular";
       box.innerHTML = `
-        <div class="notice notice--error">
-          推論サーバー（${esc(LOC_CONFIG.url)}）に接続できませんでした。<br>
-          ${esc(detail || "")}
-          ${LOC_CONFIG.autoFallbackToMock ? "<br>モックのLoCに切り替えて計測を続けます。" : ""}
+        <div class="notice notice--error" role="alert">
+          <strong>推論サーバーに接続できませんでした。</strong>${detail && !detail.startsWith("推論サーバーに接続できません") ? `（${esc(detail)}）` : ""}<br>
+          LoC は推定されませんが、学習時間の計測は続けています。このまま「終了して記録」すると LoC なしで記録されます。
         </div>`;
-      // 自動で切り替えない設定のときは、手動で切り替えるボタンを出す
-      if (!LOC_CONFIG.autoFallbackToMock) {
-        const btn = el(`<button class="btn btn--sm" type="button" style="margin-top:8px">モックで続ける</button>`);
-        btn.addEventListener("click", () => state.client?.switchToMock());
-        box.appendChild(btn);
-      }
-    } else if (status === LOC_STATUS.MOCK || status === LOC_STATUS.LIVE) {
-      // 復帰したらエラー表示は数秒で消す
-      setTimeout(() => { if (state.running) box.innerHTML = ""; }, 4000);
+      const btn = el(`<button class="btn btn--sm" type="button" style="margin-top:8px">${icon("loc", 16)}再接続</button>`);
+      btn.addEventListener("click", () => {
+        if (!state.running) return;
+        box.innerHTML = "";
+        state.client?.restart();
+      });
+      box.appendChild(btn);
+    } else if (status === LOC_STATUS.LIVE) {
+      box.innerHTML = "";
     }
   }
 
@@ -756,11 +706,10 @@ function renderMeasure(ctx) {
     box.innerHTML = `
       <div class="notice notice--warn">
         ${esc(reason)}<br>
-        LoCなしの通常記録に切り替えて、学習時間を手入力できます。
+        カメラを使わずに、ストップウォッチや手動入力で記録することもできます。
       </div>`;
-    const btn = el(`<button class="btn btn--sm" type="button" style="margin-top:8px">手入力で記録する</button>`);
-    btn.addEventListener("click", () => openManualRecordModal(material.id));
-    box.appendChild(btn);
+    box.appendChild(el(`<a class="btn btn--sm" href="#/input/${material.id}" style="margin-top:8px">
+      ${icon("clock", 16)}ストップウォッチ・手動入力で記録する</a>`));
   }
 
   /** 計測中にページを離れようとしたとき（文言はブラウザが決めるので変えられない） */

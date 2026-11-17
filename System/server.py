@@ -15,11 +15,13 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     POST   /api/categories           {name, color} → カテゴリを作る
     POST   /api/materials            {title, categoryId, isbn?, image?(data URL), coverUrl?}
     DELETE /api/materials/<id>
+    POST   /api/materials/<id>/copy  {categoryId} ほかの人の教材を自分の教材に登録する {material}
     GET    /api/materials/<id>/image 教材の画像（JSON ではなく画像そのもの）
     GET    /api/books/<isbn>         バーコードの番号から書名・表紙を調べる
 
     GET    /api/records              自分の学習記録 {records}（新しい順）
-    POST   /api/records              {materialId, durationMin, memo?, locSeries?, source?} → 記録を追加
+    POST   /api/records              {materialId, durationMin, memo?, locSeries?, source?, createdAt?} → 記録を追加
+                                     （createdAt は手動入力で選んだ日時。省略すると今）
     POST   /api/records/import       {records:[...]} localStorage に残っていた記録を一度だけ取り込む
     DELETE /api/records              自分の学習記録をすべて消す
     GET    /api/records/<id>         記録（投稿）1件 {record}
@@ -40,6 +42,7 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     GET    /api/users/<id>/avatar    プロフィール画像（JSON ではなく画像そのもの）
     GET    /api/featured-users       初回設定でフォローを勧める運営アカウント {users}
     GET    /api/users/<id>/records   その人の学習記録 {records}
+    GET    /api/users/<id>/materials その人の教材 {materials}（画像はフォロー中の人の教材だけ）
     GET    /api/users/<id>/followers フォロワー {users}
     GET    /api/users/<id>/following フォロー中 {users}
     PUT    /api/users/<id>/follow    フォローする（承認なし）{user}
@@ -147,6 +150,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("POST", r"/api/categories", "_add_category"),
         ("POST", r"/api/materials", "_add_material"),
         ("DELETE", r"/api/materials/(\d+)", "_delete_material"),
+        ("POST", r"/api/materials/(\d+)/copy", "_copy_material"),
         ("GET", r"/api/materials/(\d+)/image", "_material_image"),
         ("GET", r"/api/books/([0-9Xx-]{10,17})", "_lookup_book"),
         ("GET", r"/api/records", "_list_records"),
@@ -167,6 +171,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("GET", r"/api/users", "_search_users"),
         ("GET", r"/api/users/(\d+)", "_get_user"),
         ("GET", r"/api/users/(\d+)/records", "_user_records"),
+        ("GET", r"/api/users/(\d+)/materials", "_user_materials"),
         ("GET", r"/api/users/(\d+)/avatar", "_avatar"),
         ("GET", r"/api/featured-users", "_featured_users"),
         ("GET", r"/api/users/(\d+)/followers", "_followers"),
@@ -334,6 +339,19 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         self.materials.delete_material(user["id"], material_id)
         self._send_json(200, {"ok": True})
 
+    def _copy_material(self, material_id: int) -> None:
+        """ほかの人の教材を自分の教材に登録する。画像はその人の教材の画像が見えるとき（フォロー中）だけ写す。"""
+        user = self._require_user()
+        body = self._read_json()
+        owner = self.materials.owner_of(material_id)
+        if owner is None:
+            raise AuthError(404, "教材が見つかりません")
+        self.social.get_user(user["id"], owner)  # 見えない（初回設定前など）ユーザーの教材なら 404
+        material = self.materials.copy_material(
+            user["id"], material_id, body.get("categoryId"),
+            with_image=self.social.is_following(user["id"], owner))
+        self._send_json(201, {"material": material})
+
     def _material_image(self, material_id: int) -> None:
         user = self._require_user()
         # 自分の教材か、フォロー中の人の教材（タイムラインの記録に出る）だけ見られる
@@ -441,6 +459,12 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         records = self.records.list_for_user(user_id, limit=USER_RECORDS_LIMIT, viewer_id=user["id"])
         self._hide_unfollowed_images(user["id"], target["id"], records)
         self._send_json(200, {"records": records})
+
+    def _user_materials(self, user_id: int) -> None:
+        user = self._require_user()
+        target = self.social.get_user(user["id"], user_id)  # 見えない（初回設定前など）ユーザーなら 404
+        with_images = target["id"] == user["id"] or self.social.is_following(user["id"], target["id"])
+        self._send_json(200, {"materials": self.materials.list_public(target["id"], with_images)})
 
     def _hide_unfollowed_images(self, viewer_id: int, owner_id: int, records) -> None:
         """教材の画像はフォロー中の人にだけ見せるので、それ以外には画像なしとして渡す。"""

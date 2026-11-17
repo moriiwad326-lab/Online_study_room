@@ -7,7 +7,7 @@
  *  AI の説明の数字（768次元・12枚など）は LoC/README の設計に合わせている。モデルを変えたらここも直す。
  */
 
-import { el, esc } from "../utils.js";
+import { el, esc, LOC_HIGH_MIN, LOC_MID_MIN } from "../utils.js";
 import { icon } from "../icons.js";
 import { APP_VERSION, RELEASES } from "../version.js";
 
@@ -57,9 +57,9 @@ function renderLoc() {
       <section class="card">
         <h2 class="card__title">数値の目安</h2>
         <div class="loc-scale">
-          <div class="loc-scale__item is-loc-high"><b>70〜100</b><span>集中している</span></div>
-          <div class="loc-scale__item is-loc-mid"><b>40〜69</b><span>ふつう</span></div>
-          <div class="loc-scale__item is-loc-low"><b>0〜39</b><span>集中が切れている</span></div>
+          <div class="loc-scale__item is-loc-high"><b>${LOC_HIGH_MIN}〜100</b><span>集中している</span></div>
+          <div class="loc-scale__item is-loc-mid"><b>${LOC_MID_MIN}〜${LOC_HIGH_MIN - 1}</b><span>ふつう</span></div>
+          <div class="loc-scale__item is-loc-low"><b>0〜${LOC_MID_MIN - 1}</b><span>集中が切れている</span></div>
         </div>
         <p class="u-small u-muted" style="margin-top:10px">
           ペンを動かして書いている・教材に向かっているほど高く、スマホを触っている・手が止まっている・

@@ -85,6 +85,8 @@
   overflow: hidden;
 }
 .thumb--sm { width: 54px; height: 70px; font-size: 10px; }
+.thumb--xs { width: 40px; height: 52px; font-size: 8px; padding: 3px; border-radius: 6px; }
+.thumb--xl { width: 150px; height: 190px; font-size: 15px; padding: 12px; }
 /* 画像のあるサムネイル（表紙・アップロード画像） */
 .thumb--img {
   padding: 0;
@@ -409,7 +411,6 @@
   background: var(--c-text-weak);
 }
 .status--live::before  { background: var(--c-success); }
-.status--mock::before  { background: var(--c-accent); }
 .status--error::before { background: var(--c-danger); }
 
 /* エラー・注意書き */
@@ -1011,7 +1012,7 @@ a.live-card:hover { border-color: var(--c-primary); }
 }
 .live-card__spark { display: block; width: 100%; height: 26px; margin-top: 4px; }
 .live-card__spark.u-hidden { display: none; }
-/* LoC が無い（準備中・モック計測）ときのゲージ */
+/* LoC が無い（準備中・推論サーバー未接続・ストップウォッチ）ときのゲージ */
 .gauge--none .gauge__value { color: var(--c-text-weak); }
 
 /* =========================================================
@@ -1243,3 +1244,329 @@ button.article:hover .article__title { color: var(--c-primary); }
 .release__head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .release__title { font-size: 15px; font-weight: 800; }
 .release--current { border-color: var(--c-primary); }
+
+/* =========================================================
+   ver1.2：記録の入力（手動入力・ストップウォッチ）
+   全画面（body.is-full）で出す。Studyplus の「記録の入力」にならった形
+   ========================================================= */
+.rec-input {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+}
+.rec-input__bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 8px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--c-surface);
+}
+.rec-input__close {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--c-text);
+}
+.rec-input__close:hover { background: var(--c-surface-2); }
+.rec-input__title { flex: 1; font-size: 16px; font-weight: 800; }
+.rec-input__action {
+  padding: 8px 10px;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--c-primary);
+}
+.rec-input__action:disabled { color: var(--c-text-weak); cursor: default; }
+
+.rec-input__tabs {
+  padding: 4px 16px 12px;
+  border-bottom: 1px solid var(--c-border);
+}
+.rec-tabs {
+  display: flex;
+  max-width: 640px;
+  margin: 0 auto;
+  border-radius: 8px;
+  background: #ececef;
+  overflow: hidden;
+}
+.rec-tabs__item {
+  flex: 1;
+  height: 34px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--c-text-sub);
+  transition: background .15s, color .15s;
+}
+.rec-tabs__item.is-active { background: #777a86; color: #fff; }
+
+.rec-input__panel { flex: 1; display: flex; flex-direction: column; }
+.rec-input__panel[data-panel="manual"] { background: #f1f2f5; }
+
+/* 手動入力：白い帯を灰色の背景に並べる */
+.rec-group { background: var(--c-surface); margin-top: 14px; }
+.rec-group__inner { max-width: 640px; margin: 0 auto; padding: 0 16px; }
+.rec-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text);
+  text-align: left;
+  font-size: 14px;
+}
+.rec-row:last-child { border-bottom: none; }
+button.rec-row:hover { background: var(--c-surface-2); }
+.rec-row > svg:last-child { color: var(--c-text-weak); flex-shrink: 0; }
+.rec-row--material { min-height: 76px; }
+.rec-row__icon { color: var(--c-text-sub); display: inline-flex; flex-shrink: 0; }
+.rec-row__label { flex: 1; font-weight: 700; color: var(--c-text-sub); }
+.rec-row__label--empty { color: var(--c-text-weak); }
+.rec-row__material { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.rec-row__material-title { font-weight: 800; overflow-wrap: anywhere; }
+.rec-row__date {
+  position: relative;
+  flex: 1;
+  font-weight: 700;
+  color: var(--c-text-sub);
+  cursor: pointer;
+}
+/* 日時の文字の上に透明の input を重ね、押すと端末の日時ピッカーが開くようにする */
+.rec-row__date-input {
+  position: absolute;
+  inset: -8px 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 16px; /* iOS で拡大されないように */
+}
+.rec-row__now { font-weight: 800; font-size: 13px; flex-shrink: 0; }
+.rec-row__duration { display: inline-flex; align-items: center; gap: 4px; color: var(--c-text-sub); font-weight: 700; }
+.rec-select {
+  height: 36px;
+  padding: 0 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--c-text);
+}
+.rec-select:disabled { opacity: .45; }
+.rec-memo {
+  display: block;
+  width: 100%;
+  min-height: 180px;
+  padding: 16px 0;
+  border: none;
+  resize: vertical;
+  font: inherit;
+  font-size: 15px;
+  color: var(--c-text);
+  background: transparent;
+  outline: none;
+}
+.rec-memo::placeholder { color: var(--c-text-weak); }
+.rec-input__note { padding: 12px 0; }
+
+/* ストップウォッチ */
+.sw {
+  flex: 1;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 36px 16px calc(28px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.sw__material {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border-radius: var(--radius);
+}
+.sw__material:hover { background: var(--c-surface-2); }
+.sw__material .thumb--xl { box-shadow: var(--shadow); }
+.sw__placeholder { background: var(--c-surface-2); border: 1px dashed var(--c-border); color: var(--c-text-weak); }
+.sw__title { font-weight: 700; color: var(--c-text-sub); max-width: 280px; text-align: center; overflow-wrap: anywhere; }
+.sw__time {
+  margin-top: 28px;
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+.sw__controls {
+  width: 100%;
+  margin-top: auto;
+  padding-top: 40px;
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+}
+.sw__start { width: 100%; height: 50px; font-size: 16px; justify-content: center; }
+.sw__start--running { background: var(--c-text-sub); }
+.sw__start--running:hover { background: var(--c-text); }
+.sw__reset { color: var(--c-text-sub); font-weight: 700; }
+.sw__reset:disabled { opacity: .4; cursor: default; text-decoration: none; }
+
+/* ストップウォッチが動いているときの入口（LoC計測の教材一覧） */
+.sw-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--c-primary);
+  color: #fff;
+  text-decoration: none;
+  box-shadow: var(--shadow);
+}
+.sw-banner:hover { background: var(--c-primary-dark); }
+.sw-banner__text { flex: 1; display: grid; gap: 2px; min-width: 0; }
+
+/* 教材を選ぶモーダルの一覧 */
+.pick-list { display: grid; gap: 14px; max-height: 55vh; overflow-y: auto; margin-bottom: 10px; }
+.pick-list__group { display: grid; gap: 6px; justify-items: start; }
+.pick-list__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.pick-list__item:hover { border-color: var(--c-primary); }
+.pick-list__item.is-active { border-color: var(--c-primary); background: var(--c-primary-light); color: var(--c-primary-dark); }
+.pick-list__title { flex: 1; min-width: 0; font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
+
+/* プロフィール画像の切り抜き（cropper.js） */
+.cropper {
+  position: relative;
+  width: min(100%, 320px);
+  aspect-ratio: 1;
+  margin: 0 auto 12px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: #222;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cropper:active { cursor: grabbing; }
+.cropper__img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+/* 丸い枠の外側を暗くする */
+.cropper__mask {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, .5);
+  border: 2px solid rgba(255, 255, 255, .85);
+  pointer-events: none;
+}
+.cropper__zoom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 320px;
+  margin: 0 auto 6px;
+  color: var(--c-text-sub);
+  font-weight: 700;
+}
+.cropper__zoom input { flex: 1; accent-color: var(--c-primary); }
+
+/* =========================================================
+   ver1.2：プロフィールの見出し（スマホ幅での崩れを直す）・教材の共有
+   ========================================================= */
+.profile-head__info { flex: 1; min-width: 0; }
+.profile-head__name { overflow-wrap: anywhere; line-height: 1.3; }
+.profile-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  align-self: flex-start;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.profile-head__actions .btn { white-space: nowrap; }
+.chip--block { display: inline-block; margin: 6px 0 0; }
+@media (max-width: 640px) {
+  .profile-head { flex-wrap: wrap; align-items: flex-start; gap: 12px 14px; }
+  .avatar--lg { width: 60px; height: 60px; font-size: 22px; }
+  /* フォロー・メッセージのボタンは名前の下の段に、横いっぱいで並べる */
+  .profile-head__actions { flex: 1 1 100%; margin-left: 0; justify-content: stretch; flex-wrap: nowrap; }
+  .profile-head__actions .btn { flex: 1; justify-content: center; }
+}
+
+/* 教材のカード（文字の部分）と「登録」の印 */
+.material-card__text { min-width: 0; display: grid; gap: 3px; justify-items: start; }
+.material-card__title { overflow-wrap: anywhere; }
+button.material-card { cursor: pointer; font: inherit; color: inherit; }
+.mat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--c-primary-light);
+  color: var(--c-primary-dark);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mat-badge--done { background: #e6f7ef; color: #1d8a5a; }
+
+/* 教材の詳細（モーダル） */
+.mat-sheet { display: flex; gap: 14px; align-items: flex-start; }
+.mat-sheet__info { flex: 1; min-width: 0; display: grid; gap: 6px; justify-items: start; }
+.mat-sheet__title { font-size: 15px; font-weight: 800; overflow-wrap: anywhere; }
+
+/* 投稿の教材（押すと詳細） */
+.post__thumb-btn { padding: 0; border-radius: var(--radius-sm); flex: 0 0 auto; cursor: pointer; }
+.post__thumb-btn:hover .thumb { box-shadow: 0 0 0 2px var(--c-primary); }
+.post__material-btn {
+  display: block;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  font-weight: 700;
+  color: var(--c-text);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.post__material-btn:hover { color: var(--c-primary); text-decoration: underline; }
+
+/* プロフィールの「登録した教材」 */
+.card__head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.card__head-row .card__title { margin-bottom: 0; }
+.profile-materials .section { margin-bottom: 14px; }
+.stat--link { display: block; color: inherit; text-decoration: none; transition: border-color .15s; }
+.stat--link:hover { border-color: var(--c-primary); }

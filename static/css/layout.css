@@ -301,6 +301,10 @@
 /* ---------------- ログインまわりの全画面ページ ---------------- */
 /* サイドバー・ヘッダーを出さず、.page の幅制限も外す */
 body.is-auth .sidebar,
-body.is-auth .header { display: none; }
-body.is-auth .app-shell { display: block; }
-body.is-auth .page { max-width: none; padding: 0; }
+body.is-auth .header,
+body.is-full .sidebar,
+body.is-full .header { display: none; }
+body.is-auth .app-shell,
+body.is-full .app-shell { display: block; }
+body.is-auth .page,
+body.is-full .page { max-width: none; padding: 0; }

@@ -17,7 +17,7 @@ from pathlib import Path
 from .db import connect
 from .social import SCHEMA as SOCIAL_SCHEMA, notify
 
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 RELEASE_TITLE = f"Onsta ver{APP_VERSION} に更新しました"
 
 SCHEMA = """

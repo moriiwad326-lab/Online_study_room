@@ -5,14 +5,15 @@
  *  ニックネームだけ必須で、ほかはすべて任意。
  *  保存はサーバー側でも検証するので、ここでのチェックは入力しやすさのためのもの。
  *
- *  プロフィール画像は、選んだ画像の真ん中を正方形に切り抜いて AVATAR_SIZE px に縮め、
- *  JPEG にしてから送る（スマホの写真をそのまま送ると大きすぎるため）。
+ *  プロフィール画像は、選んだあとに切り抜く範囲（正方形。位置と大きさ）を決めてもらい（cropper.js）、
+ *  AVATAR_SIZE px に縮めた JPEG にしてから送る（スマホの写真をそのまま送ると大きすぎるため）。
  *  送るのは「保存」を押したとき（プロフィールを保存したあと）。画像を設定しない人は色の丸のまま。
  */
 
 import { el, esc, toast } from "../utils.js";
 import { icon } from "../icons.js";
 import * as store from "../store.js";
+import { cropSquareImage } from "../cropper.js";
 
 /** アイコンの色の候補（科目色と同じトーンでそろえる） */
 const AVATAR_COLORS = [
@@ -165,7 +166,9 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
     imageInput.value = "";  // 同じ画像を選び直しても change が起きるように
     if (!file) return;
     try {
-      pendingImage = await squareImage(file);
+      const cropped = await cropSquareImage(file, { size: AVATAR_SIZE, quality: AVATAR_QUALITY });
+      if (!cropped) return;  // 範囲を決めずに閉じた
+      pendingImage = cropped;
       imageAction = "upload";
     } catch {
       toast("この画像は読み込めませんでした。JPEG か PNG の画像を選んでください");
@@ -214,37 +217,6 @@ export function renderProfileForm({ submitLabel, cancelHref, onSaved }) {
   });
 
   return node;
-}
-
-/**
- * 画像ファイルの真ん中を正方形に切り抜き、AVATAR_SIZE px の JPEG（data URL）にする。
- * スマホの写真の向き（EXIF）は、いまのブラウザは img に描くときに直してくれる。
- */
-function squareImage(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      const side = Math.min(img.naturalWidth, img.naturalHeight);
-      if (!side) return reject(new Error("画像の大きさが取れません"));
-      const canvas = document.createElement("canvas");
-      canvas.width = AVATAR_SIZE;
-      canvas.height = AVATAR_SIZE;
-      const ctx = canvas.getContext("2d");
-      // 透過 PNG の背景が黒くならないように白で塗っておく
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(0, 0, AVATAR_SIZE, AVATAR_SIZE);
-      ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side,
-                    0, 0, AVATAR_SIZE, AVATAR_SIZE);
-      resolve(canvas.toDataURL("image/jpeg", AVATAR_QUALITY));
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("画像を読み込めません"));
-    };
-    img.src = url;
-  });
 }
 
 /** フォームの値を API に送る形にする */
