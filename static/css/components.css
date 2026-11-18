@@ -1570,3 +1570,68 @@ button.material-card { cursor: pointer; font: inherit; color: inherit; }
 .profile-materials .section { margin-bottom: 14px; }
 .stat--link { display: block; color: inherit; text-decoration: none; transition: border-color .15s; }
 .stat--link:hover { border-color: var(--c-primary); }
+
+/* =========================================================
+   ver1.3：iOS でのプレビュー再生・プレビューの共有
+   ========================================================= */
+
+/* 自動で再生できなかったときの「タップして映像を表示」（iOS の省電力モードなど） */
+.stage__tap {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: rgba(17, 19, 31, .78);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.stage__tap.u-hidden { display: none; }
+.stage__top, .stage__bottom { z-index: 2; }
+
+.stage__badges { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+/* 共有中のバッジ（映像の上でも目立つように） */
+.stage .status--share { background: rgba(214, 64, 69, .85); border-color: transparent; }
+.status--share::before { display: none; }
+
+/* 計測中の「プレビューを共有」ボタン（共有中は色を付ける） */
+.btn[data-act="toggle-share"].is-active {
+  background: var(--c-primary-light);
+  border-color: var(--c-primary);
+  color: var(--c-primary-dark);
+}
+.share-terms { margin: 10px 0 0 1.2em; line-height: 1.8; list-style: disc; }
+
+/* いま勉強中：共有されたプレビュー */
+.live-card.has-preview { flex-basis: 168px; }
+.live-card__preview {
+  position: relative;
+  margin: -4px -2px 8px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #11131f;
+  cursor: zoom-in;
+}
+.live-card__preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.live-card__preview.u-hidden { display: none; }
+
+/* プレビューの拡大表示（モーダル） */
+.live-viewer {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #11131f;
+}
+.live-viewer__img { display: block; width: 100%; max-height: 70vh; object-fit: contain; }
+.live-viewer__ended { color: #8b90a8; font-size: 13px; padding: 24px; }
+.live-viewer__meta { margin-top: 8px; overflow-wrap: anywhere; }

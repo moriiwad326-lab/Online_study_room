@@ -6,6 +6,10 @@
 - 見せる相手は、本人とその人をフォローしている人（フォローは承認なしなので、実質ログインしている誰でも）
 - 推論サーバーにつながらずモックの LoC で計測しているときは、LoC を送らない（loc は None）。
   本物ではない値を他の人に見せないため
+- 計測する人が「プレビューを共有」をオンにしたときだけ、カメラ映像の小さな静止画（JPEG）が状態と一緒に届く
+  （ver1.3）。見せる相手は本人と相互フォローの人だけ（フォローは承認なしなので、片方向のフォローでは見せない）。
+  静止画はこのプロセスのメモリにだけ置き、ディスクには書かない。共有をやめた・計測を終えた・
+  STALE_SEC 秒届かなくなったら捨てる
 
 HTTP の扱いは `server.py`、ここは純粋なデータ操作だけを持つ。
 """
@@ -14,15 +18,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from .auth import AuthError
 from .db import connect
-from .materials import SCHEMA as MATERIALS_SCHEMA
+from .materials import SCHEMA as MATERIALS_SCHEMA, decode_image
 from .social import SCHEMA as SOCIAL_SCHEMA, public_profile
 
 # これより長く更新が無い計測は、終わったものとみなす（秒）
@@ -31,6 +36,8 @@ STALE_SEC = 30
 MAX_RECENT = 60
 MAX_ELAPSED_SEC = 24 * 3600
 STATUSES = ("warmup", "studying", "paused")
+# 共有するプレビューの静止画の上限（ブラウザで横 320px 程度の JPEG にしてから送ってくる）
+MAX_PREVIEW_BYTES = 200 * 1024
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_sessions (
@@ -87,10 +94,28 @@ def normalize_live(data: Any) -> Dict[str, Any]:
     }
 
 
+def decode_preview(data_url: Any) -> Optional[bytes]:
+    """共有するプレビューの静止画（JPEG の data URL）をバイト列にする。None なら共有していない。"""
+    if data_url is None:
+        return None
+    try:
+        data, image_type = decode_image(data_url)
+    except AuthError:
+        raise AuthError(400, "プレビューの画像の形式が正しくありません", "preview") from None
+    if image_type != "image/jpeg":
+        raise AuthError(400, "プレビューの画像は JPEG にしてください", "preview")
+    if len(data) > MAX_PREVIEW_BYTES:
+        raise AuthError(400, "プレビューの画像が大きすぎます", "preview")
+    return data
+
+
 class LiveStore:
     def __init__(self, db_path: Path, clock=time.time):
         self.db_path = Path(db_path)
         self.clock = clock
+        # ユーザーID → (プレビューの JPEG, 届いた時刻)。メモリにだけ置く
+        self._previews: Dict[int, Tuple[bytes, float]] = {}
+        self._lock = threading.Lock()
         with closing(connect(self.db_path)) as conn, conn:
             # 教材・フォローの表と JOIN するので、先に作られていなくても困らないようにする
             conn.executescript(MATERIALS_SCHEMA + SOCIAL_SCHEMA + SCHEMA)
@@ -101,6 +126,7 @@ class LiveStore:
     def update(self, user_id: int, data: Any) -> None:
         """計測中の今の状態を書く（はじめての送信なら計測の開始）。"""
         live = normalize_live(data)
+        preview = decode_preview(data.get("preview"))
         now = self.clock()
         with closing(self._connect()) as conn, conn:
             if not conn.execute(
@@ -121,10 +147,42 @@ class LiveStore:
                 (user_id, live["material_id"], live["status"], live["elapsed_sec"], live["loc"],
                  json.dumps(live["recent"]), datetime.now(timezone.utc).isoformat(), now),
             )
+        with self._lock:
+            if preview is None:
+                self._previews.pop(user_id, None)  # 共有をやめた（または一時停止中）
+            else:
+                self._previews[user_id] = (preview, now)
 
     def end(self, user_id: int) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute("DELETE FROM live_sessions WHERE user_id = ?", (user_id,))
+        with self._lock:
+            self._previews.pop(user_id, None)
+
+    def _fresh_previews(self, now: float) -> Dict[int, Tuple[bytes, float]]:
+        """古くなったプレビューを捨てて、残りを返す。"""
+        with self._lock:
+            for user_id in [k for k, (_, at) in self._previews.items() if at < now - STALE_SEC]:
+                del self._previews[user_id]
+            return dict(self._previews)
+
+    def get_preview(self, viewer_id: int, user_id: int) -> bytes:
+        """user_id が共有しているプレビューの静止画。本人と相互フォローの人にだけ返す。"""
+        now = self.clock()
+        preview = self._fresh_previews(now).get(user_id)
+        if preview is None:
+            raise AuthError(404, "プレビューは共有されていません")
+        if viewer_id != user_id:
+            with closing(self._connect()) as conn:
+                mutual = conn.execute(
+                    "SELECT COUNT(*) FROM follows WHERE (follower_id = :me AND followee_id = :them)"
+                    " OR (follower_id = :them AND followee_id = :me)",
+                    {"me": viewer_id, "them": user_id},
+                ).fetchone()[0] == 2
+            if not mutual:
+                # 見せない相手には、共有しているかどうかも知らせない
+                raise AuthError(404, "プレビューは共有されていません")
+        return preview[0]
 
     def list_for(self, viewer_id: int) -> List[Dict[str, Any]]:
         """本人とフォロー中の人の、いま続いている計測。始めた順。"""
@@ -132,7 +190,9 @@ class LiveStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("DELETE FROM live_sessions WHERE updated_at < ?", (now - STALE_SEC,))
             rows = conn.execute(
-                "SELECT s.*, u.profile, m.title AS m_title, c.name AS c_name, c.color AS c_color"
+                "SELECT s.*, u.profile, m.title AS m_title, c.name AS c_name, c.color AS c_color,"
+                " EXISTS (SELECT 1 FROM follows WHERE follower_id = s.user_id AND followee_id = :me)"
+                " AS follows_me"
                 " FROM live_sessions s"
                 " JOIN users u ON u.id = s.user_id"
                 " LEFT JOIN materials m ON m.id = s.material_id AND m.user_id = s.user_id"
@@ -142,6 +202,15 @@ class LiveStore:
                 " ORDER BY s.started_at",
                 {"me": viewer_id},
             ).fetchall()
+        previews = self._fresh_previews(now)
+
+        def preview_at(row: sqlite3.Row) -> Optional[int]:
+            # 本人か相互フォロー（ここに並ぶ他人は自分がフォローしている人なので、相手からのフォローを見る）
+            if row["user_id"] != viewer_id and not row["follows_me"]:
+                return None
+            preview = previews.get(row["user_id"])
+            return None if preview is None else round(preview[1] * 1000)
+
         return [{
             "user": public_profile({"id": row["user_id"], "profile": row["profile"]}),
             "material": {
@@ -156,4 +225,6 @@ class LiveStore:
             "startedAt": row["started_at"],
             # 最後に届いてから何秒たったか（画面で継続時間を進めるのに使う）
             "secondsSinceUpdate": max(0, round(now - row["updated_at"])),
+            # 見られるプレビューがあれば、その時刻（ms）。画像の URL に付けて古い画像を使わせない
+            "previewAt": preview_at(row),
         } for row in rows]

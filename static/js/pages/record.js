@@ -13,6 +13,15 @@
  *
  *  推論サーバーにつながらない・切れたときは、その旨を出して LoC なしで時間だけ計り続ける
  *  （「再接続」でつなぎ直せる）。LoC が1つも届かなかった計測は LoC なしの記録になる。
+ *
+ *  iOS / iPadOS の Safari では、video に映像をつないだだけでは再生が始まらず、プレビューが黒いままになる
+ *  ことがある（非表示の要素につないだとき・アプリを切り替えて戻ったときなど）。そこで、計測画面を
+ *  表示してから映像をつなぎ、play() を明示的に呼ぶ。再生できなければ「タップして映像を表示」を出す。
+ *  画面に戻ったときに止まっていれば再生し直し、カメラが切れていれば開き直す（ver1.3）。
+ *
+ *  「プレビューを共有」をオンにすると、カメラ映像の小さな静止画を「いま勉強中」の状態と一緒に約5秒ごとに
+ *  送り、相互フォローの人のタイムラインに出る（ver1.3）。計測を始めるたびにオフから始まり、
+ *  一時停止中は送らない。
  */
 
 import { el, esc, formatClock, formatDuration, clampLoc, locLevelClass, toast, openModal, average, thumbHtml } from "../utils.js";
@@ -32,6 +41,8 @@ const ZERO_LIMIT_SEC = 60;       // LoC が 0（席を離れているなど）�
 const RESUME_LOC = 30;           // 一時停止後、これより上に戻ったら 0 から数え直す
 const LIVE_INTERVAL_MS = 5000;   // フォロワーの「いま勉強中」に今の状態を送る間隔（LoC も約5秒ごとに届く）
 const LIVE_RECENT_MAX = 60;      // 「いま勉強中」に見せる直近の LoC の点数（5秒ごとで5分ぶん）
+const PREVIEW_MAX_SIDE = 320;    // 共有するプレビューの静止画の長いほうの辺（px）
+const PREVIEW_QUALITY = 0.6;     // その JPEG の品質
 
 /*
  * 使うカメラ。最後に選んだものを覚えておく。
@@ -61,6 +72,20 @@ function saveFacing(facing) {
 }
 
 const getVideo = (video) => navigator.mediaDevices.getUserMedia({ video, audio: false });
+
+/**
+ * iOS / iPadOS の Safari でカメラ映像をページの中で再生できるようにする。
+ * HTML の属性だけでは効かないことがあるので、プロパティでも消音・インライン再生を指定する。
+ */
+function prepareVideo(video) {
+  video.muted = true;
+  video.defaultMuted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute("muted", "");
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
+}
 const stopStream = (stream) => stream.getTracks().forEach((track) => track.stop());
 
 /** 超広角カメラを探す。ラベルはカメラの許可を得るまで空なので、許可前は見つからない */
@@ -274,8 +299,11 @@ function renderMeasure(ctx) {
         <h2 class="card__title">計測中</h2>
 
         <div class="stage" data-camera>
-          <video playsinline muted autoplay data-video></video>
+          <video playsinline webkit-playsinline muted autoplay data-video></video>
           <div class="stage__off u-hidden" data-camera-off>プレビュー非表示中</div>
+          <button class="stage__tap u-hidden" type="button" data-tap-play>
+            ${icon("play", 28)}<span>タップして映像を表示</span>
+          </button>
 
           <div class="stage__top">
             <div>
@@ -283,7 +311,10 @@ function renderMeasure(ctx) {
               <div class="stage__timer tabular" data-timer>00:00:00</div>
               <div class="stage__sub tabular">合計 <span data-total>00:00:00</span></div>
             </div>
-            <span class="status" data-status>待機中</span>
+            <div class="stage__badges">
+              <span class="status" data-status>待機中</span>
+              <span class="status status--share u-hidden" data-share-badge>${icon("share", 14)}共有中</span>
+            </div>
           </div>
 
           <div class="stage__bottom">
@@ -300,6 +331,9 @@ function renderMeasure(ctx) {
           <button class="btn btn--ghost" type="button" data-act="pause">${icon("pause", 18)}一時停止</button>
           <button class="btn btn--danger" type="button" data-act="finish">${icon("stop", 18)}終了して記録</button>
           <div class="u-row" style="margin-left:auto;gap:8px;flex-wrap:wrap">
+            <button class="btn btn--ghost btn--sm" type="button" data-act="toggle-share" aria-pressed="false">
+              ${icon("share", 16)}<span>プレビューを共有</span>
+            </button>
             <button class="btn btn--ghost btn--sm u-hidden" type="button" data-act="switch-camera">
               ${icon("camera", 16)}<span>外カメラに切替</span>
             </button>
@@ -336,6 +370,9 @@ function renderMeasure(ctx) {
     liveLoc: null,      // 推論サーバーから受け取った直近の LoC（切れたら null に戻す）
     liveRecent: [],     // フォロワーに見せる直近の LoC（最大 LIVE_RECENT_MAX 点）
     liveTimer: null,    // 「いま勉強中」を送るタイマー
+    playWatch: null,    // 映像が止まっていないか見張るタイマー（iOS 対策）
+    sharePreview: false, // 相互フォローの人にプレビューの静止画を見せる（計測ごとにオフから始める）
+    previewCanvas: null, // 共有する静止画を描く canvas
   };
 
   /* ---- 要素の取り出し ---- */
@@ -349,6 +386,9 @@ function renderMeasure(ctx) {
   const warmupEl = q("[data-loc-warmup]");
   const totalEl = q("[data-total]");
   const autoPausedEl = q("[data-auto-paused]");
+  const tapPlayBtn = q("[data-tap-play]");
+  const shareBadge = q("[data-share-badge]");
+  prepareVideo(video);
 
   /* ---- 同意チェックで開始ボタンを有効化 ---- */
   const consent = q("[data-consent]");
@@ -382,13 +422,74 @@ function renderMeasure(ctx) {
     switchBtn.querySelector("span").textContent = `${FACING_LABEL[nextFacing()]}に切替`;
   }
 
-  /** カメラの映像を画面に出す。外カメラは鏡写しにしない（内カメラだけ鏡のように見せる） */
+  /**
+   * カメラの映像を画面に出す。外カメラは鏡写しにしない（内カメラだけ鏡のように見せる）。
+   * 計測画面を表示してから呼ぶ（iOS は表示されていない video を再生しないことがある）。
+   */
   function showStream(stream, facing) {
     state.stream = stream;
     state.facing = facing;
     video.srcObject = stream;
     video.classList.toggle("is-rear", facing !== "user");
     renderSwitchLabel();
+    // iOS では一時的に映像が止まる（ほかのアプリがカメラを使った等）と mute が来る。戻ったら再生し直す
+    stream.getVideoTracks().forEach((track) => {
+      track.addEventListener("unmute", () => { if (state.stream === stream) playVideo(); });
+      track.addEventListener("ended", () => { if (state.stream === stream) recoverCamera(); });
+    });
+    playVideo();
+  }
+
+  /** video を再生する。自動で再生できなかったら（iOS の省電力モードなど）タップで再生してもらう */
+  async function playVideo() {
+    if (!state.stream) return;
+    try {
+      await video.play();
+      tapPlayBtn.classList.add("u-hidden");
+    } catch (err) {
+      // 別の srcObject に替えたことで中断された（AbortError）ときは、次の play() に任せる
+      if (err.name !== "AbortError") tapPlayBtn.classList.remove("u-hidden");
+    }
+  }
+  tapPlayBtn.addEventListener("click", () => playVideo());
+
+  /**
+   * カメラを開き直す（ほかの画面・アプリから戻ったらカメラが切れていたとき）。
+   * 映るものが同じとは限らないので、推論サーバーの窓も捨てて推定し直す。
+   */
+  let recovering = false;
+  async function recoverCamera() {
+    if (!state.running || recovering || state.switching || document.visibilityState !== "visible") return;
+    recovering = true;
+    try {
+      const { stream, facing } = await openCamera(state.facing);
+      if (!state.running) {
+        stopStream(stream);
+        return;
+      }
+      if (state.stream) stopStream(state.stream);
+      showStream(stream, facing);
+      resetLocDisplay();
+      state.client?.restart();
+    } catch (err) {
+      toast(`カメラを起動し直せませんでした（${err.name}）。「終了して記録」で記録を保存できます`);
+    } finally {
+      recovering = false;
+    }
+  }
+
+  /** 画面に戻ってきたとき、止まった映像を再生し直し、切れたカメラを開き直す */
+  function onVisibilityChange() {
+    if (!state.running || document.visibilityState !== "visible") return;
+    const track = state.stream?.getVideoTracks()[0];
+    if (!track || track.readyState === "ended") recoverCamera();
+    else if (video.paused) playVideo();
+  }
+
+  function resetLocDisplay() {
+    state.lastLoc = null;
+    locNum.textContent = "--";
+    locNum.className = "stage__loc-num loc-color is-loc-mid tabular";
   }
 
   /* ---- 教材の削除（学習記録は残し、教材名は「削除した教材」になる） ---- */
@@ -414,29 +515,31 @@ function renderMeasure(ctx) {
     startBtn.disabled = true;
 
     // 1) カメラを起動する。失敗したら手動記録にフォールバックする。
+    let opened;
+    const requested = state.facing;
     try {
-      const requested = state.facing;
-      const { stream, facing } = await openCamera(requested);
-      showStream(stream, facing);
-      if (requested === "ultrawide" && facing !== "ultrawide") {
-        toast("超広角カメラが見つからなかったため、外カメラで計測します");
-      }
-      // カメラが2台以上ある端末だけ、計測中の切替ボタンを出す
-      availableFacings().then((list) => {
-        state.facings = list;
-        switchBtn.classList.toggle("u-hidden", list.length < 2);
-        renderSwitchLabel();
-      });
+      opened = await openCamera(requested);
     } catch (err) {
       showIntroError(err);
       startBtn.disabled = false;
       return;
     }
 
-    // 2) 画面を計測中に切り替える
+    // 2) 画面を計測中に切り替えてから、映像をつないで再生する（iOS で黒いままにならないように）
     introView.classList.add("u-hidden");
     measureView.classList.remove("u-hidden");
     state.running = true;
+    showStream(opened.stream, opened.facing);
+    if (requested === "ultrawide" && opened.facing !== "ultrawide") {
+      toast("超広角カメラが見つからなかったため、外カメラで計測します");
+    }
+    // カメラが2台以上ある端末だけ、計測中の切替ボタンを出す
+    availableFacings().then((list) => {
+      state.facings = list;
+      switchBtn.classList.toggle("u-hidden", list.length < 2);
+      renderSwitchLabel();
+    });
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     // 3) リアルタイムグラフを用意する（直近5分ぶん＝1秒×300点）
     state.chart = createRealtimeLocChart(q("[data-loc-chart]"), { maxPoints: 300, overlay: true });
@@ -501,6 +604,13 @@ function renderMeasure(ctx) {
       state.totalSec += 1;
       renderTimers();
     }, 1000);
+    // 映像が止まっていたら再生し直す（一時停止中も。タップを待っているときは何度も試さない）
+    state.playWatch = setInterval(() => {
+      if (state.switching || recovering) return; // カメラを開き直している途中
+      if (video.paused && tapPlayBtn.classList.contains("u-hidden") && document.visibilityState === "visible") {
+        playVideo();
+      }
+    }, 1000);
   });
 
   /** LoC による自動一時停止の切り替え（reason: "zero" | "low"） */
@@ -531,8 +641,59 @@ function renderMeasure(ctx) {
       elapsedSec: state.elapsedSec,
       loc: noLoc ? null : state.liveLoc,
       recent: noLoc ? [] : state.liveRecent,
+      // 共有していない・一時停止中は送らない（送らなければサーバーは前の静止画を捨てる）
+      preview: state.sharePreview && !state.paused ? capturePreview() : null,
     }).catch((err) => console.warn("[record] いま勉強中の状態を送れませんでした", err));
   }
+
+  /** 共有するプレビューの静止画（JPEG の data URL）。映像がまだ来ていなければ null */
+  function capturePreview() {
+    if (video.readyState < 2 || !video.videoWidth) return null;
+    const scale = Math.min(1, PREVIEW_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+    const width = Math.round(video.videoWidth * scale);
+    const height = Math.round(video.videoHeight * scale);
+    if (!state.previewCanvas) state.previewCanvas = document.createElement("canvas");
+    const canvas = state.previewCanvas;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    // 内カメラは本人の画面と同じく鏡写しにする
+    if (state.facing === "user") {
+      ctx.translate(width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, 0, 0, width, height);
+    return canvas.toDataURL("image/jpeg", PREVIEW_QUALITY);
+  }
+
+  /* ---- プレビューの共有（相互フォローの人の「いま勉強中」に静止画を出す） ---- */
+  const shareBtn = q('[data-act="toggle-share"]');
+  function renderShare() {
+    shareBtn.setAttribute("aria-pressed", String(state.sharePreview));
+    shareBtn.classList.toggle("is-active", state.sharePreview);
+    shareBtn.querySelector("span").textContent = state.sharePreview ? "共有をやめる" : "プレビューを共有";
+    shareBadge.classList.toggle("u-hidden", !state.sharePreview);
+  }
+  shareBtn.addEventListener("click", async () => {
+    if (!state.sharePreview) {
+      const ok = await openModal({
+        title: "プレビューを共有しますか？",
+        okLabel: "共有する",
+        bodyHtml: `<p class="u-muted">相互フォローの人のタイムライン「いま勉強中」に、カメラの映像を約5秒ごとの静止画で表示します。</p>
+          <ul class="u-small u-muted share-terms">
+            <li>見られるのは、あなたと相互にフォローしている人だけです</li>
+            <li>この計測のあいだだけ共有します。いつでも「共有をやめる」で止められます</li>
+            <li>一時停止中は共有しません</li>
+            <li>共有した静止画は保存されず、計測を終えると見られなくなります</li>
+          </ul>`,
+      });
+      if (!ok || !state.running) return;
+    }
+    state.sharePreview = !state.sharePreview;
+    renderShare();
+    sendLive(); // すぐに反映する（やめたときは、次の送信を待たずに静止画を消す）
+    toast(state.sharePreview ? "プレビューの共有を始めました" : "プレビューの共有をやめました");
+  });
 
   function renderTimers() {
     timerEl.textContent = formatClock(state.elapsedSec);
@@ -550,6 +711,7 @@ function renderMeasure(ctx) {
       state.client?.resume();
       pauseBtn.innerHTML = `${icon("pause", 18)}一時停止`;
     }
+    if (state.sharePreview) sendLive(); // 一時停止中の映像は共有しない（すぐに消す）
   });
 
   /* ---- カメラの切り替え（計測中） ---- */
@@ -572,9 +734,7 @@ function renderMeasure(ctx) {
       showStream(stream, facing);
       saveFacing(facing);
       // 写っている場所が変わるので、推論サーバーの窓を捨てて最初から推定し直す
-      state.lastLoc = null;
-      locNum.textContent = "--";
-      locNum.className = "stage__loc-num loc-color is-loc-mid tabular";
+      resetLocDisplay();
       state.client?.restart();
       toast(`${FACING_LABEL[facing]}に切り替えました`);
     } catch (err) {
@@ -725,8 +885,10 @@ function renderMeasure(ctx) {
     state.running = false;
     clearInterval(state.timer);
     clearInterval(state.liveTimer);
+    clearInterval(state.playWatch);
     window.removeEventListener("pagehide", store.endLive);
     window.removeEventListener("beforeunload", confirmUnload);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
     state.client?.stop();
     state.chart?.destroy();
     state.stream?.getTracks().forEach((track) => track.stop());

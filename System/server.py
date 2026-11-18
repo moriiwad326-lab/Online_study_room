@@ -34,8 +34,11 @@ API（リクエスト・レスポンスとも JSON。エラーは {"error": メ�
     GET    /api/timeline             自分とフォロー中の人の学習記録 {records}
 
     GET    /api/live                 自分とフォロー中の人の、いま続いている LoC 計測 {sessions}
-    PUT    /api/live                 {materialId, status, elapsedSec, loc, recent} 計測中の今の状態（約5秒ごと）
+    PUT    /api/live                 {materialId, status, elapsedSec, loc, recent, preview?} 計測中の今の状態
+                                     （約5秒ごと。preview は共有するカメラの静止画（JPEG の data URL）。
+                                     無ければ共有しない）
     DELETE /api/live                 計測を終えた（画面を離れた）
+    GET    /api/live/<id>/preview    共有中のプレビューの静止画（JPEG そのもの。本人と相互フォローの人だけ）
 
     GET    /api/users?q=<文字>        ニックネームでユーザーを探す {users}
     GET    /api/users/<id>           公開プロフィール＋フォロー数＋自分との関係 {user}
@@ -118,6 +121,8 @@ MAX_MATERIAL_BODY_BYTES = 3 * 1024 * 1024
 MAX_IMPORT_BODY_BYTES = 2 * 1024 * 1024
 # プロフィール画像（ブラウザで 256px 四方に縮めてから送ってくる）
 MAX_AVATAR_BODY_BYTES = 512 * 1024
+# いま勉強中の状態。共有するプレビューの静止画（data URL）が入ることがある
+MAX_LIVE_BODY_BYTES = 512 * 1024
 # 推論サーバーへ中継しないヘッダー（Cookie は推論サーバーに渡す必要がない）
 LOC_DROP_HEADERS = {"host", "cookie"}
 CRLF = "\r\n"
@@ -168,6 +173,7 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
         ("GET", r"/api/live", "_list_live"),
         ("PUT", r"/api/live", "_update_live"),
         ("DELETE", r"/api/live", "_end_live"),
+        ("GET", r"/api/live/(\d+)/preview", "_live_preview"),
         ("GET", r"/api/users", "_search_users"),
         ("GET", r"/api/users/(\d+)", "_get_user"),
         ("GET", r"/api/users/(\d+)/records", "_user_records"),
@@ -435,13 +441,17 @@ class AppHandler(http.server.SimpleHTTPRequestHandler):
 
     def _update_live(self) -> None:
         user = self._require_user()
-        self.live.update(user["id"], self._read_json())
+        self.live.update(user["id"], self._read_json(MAX_LIVE_BODY_BYTES))
         self._send_json(200, {"ok": True})
 
     def _end_live(self) -> None:
         user = self._require_user()
         self.live.end(user["id"])
         self._send_json(200, {"ok": True})
+
+    def _live_preview(self, user_id: int) -> None:
+        user = self._require_user()
+        self._send_image(self.live.get_preview(user["id"], user_id), "image/jpeg", "no-store")
 
     # ---- ユーザー・フォロー ----
 

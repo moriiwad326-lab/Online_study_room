@@ -512,7 +512,8 @@ function toReply(r) {
 /**
  * 自分とフォロー中の人の、いま続いている LoC 計測。
  * 各要素：{ user(person), material{title,categoryName,color}, status("warmup"|"studying"|"paused"),
- *          elapsedSec, loc(null はモック計測などで LoC なし), recent[], secondsSinceUpdate, isMine }
+ *          elapsedSec, loc(null はモック計測などで LoC なし), recent[], secondsSinceUpdate, isMine,
+ *          previewUrl(共有中のプレビューの静止画。自分か相互フォローの人が共有しているときだけ。なければ null) }
  */
 export async function getLiveSessions() {
   const { sessions } = await api("GET", "/api/live");
@@ -521,6 +522,8 @@ export async function getLiveSessions() {
     user: toPerson(s.user),
     material: { ...s.material, color: s.material.color || UNKNOWN_COLOR },
     isMine: s.user.id === currentUser?.id,
+    // 静止画が新しくなるたびに URL を変えて、ブラウザに古い画像を使わせない
+    previewUrl: s.previewAt ? `/api/live/${s.user.id}/preview?v=${s.previewAt}` : null,
   }));
 }
 

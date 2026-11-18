@@ -2,7 +2,9 @@
  * pages/timeline.js : タイムライン（#/timeline）
  *
  *  - 「いま勉強中」：自分とフォロー中の人のうち LoC を計測中の人を横並びで出す。
- *    LIVE_POLL_MS ごとにサーバーへ聞き直して LoC・直近の推移を更新し、継続時間は1秒ごとに進める
+ *    LIVE_POLL_MS ごとにサーバーへ聞き直して LoC・直近の推移を更新し、継続時間は1秒ごとに進める。
+ *    相互フォローの人（と自分）がプレビューを共有していれば、カードの上にその静止画を出し、
+ *    押すと大きく表示する（ver1.3）
  *  - 自分とフォロー中の人の学習記録を投稿カードとして並べ、平均LoC とスパークラインを添える
  *    （投稿カードは user.js のユーザーページと post.js の投稿の詳細でも使う）
  *  - 投稿カードからいいね（相手に通知が届く）・返信（投稿の詳細へ）・削除（自分の投稿だけ）ができる
@@ -34,12 +36,13 @@ export const meta = {
 export async function render(ctx) {
   const node = el(`<div></div>`);
   const timers = [];
+  let live = null;
 
   if (ctx.tab === "goal") {
     node.appendChild(renderGoalTab());
   } else {
     // --- いま勉強中（誰も計測していないときはセクションごと隠す） ---
-    const live = createLiveSection();
+    live = createLiveSection();
     node.appendChild(live.section);
     await live.refresh();
     timers.push(setInterval(live.refresh, LIVE_POLL_MS));
@@ -69,7 +72,10 @@ export async function render(ctx) {
 
   return {
     node,
-    destroy() { timers.forEach(clearInterval); },
+    destroy() {
+      timers.forEach(clearInterval);
+      live?.closeViewer();
+    },
   };
 }
 
@@ -112,6 +118,7 @@ function createLiveSection() {
         let entry = entries.get(session.user.id);
         if (!entry) {
           entry = { card: el(liveCardHtml(session)) };
+          bindPreview(entry);
           entries.set(session.user.id, entry);
           list.appendChild(entry.card);
         }
@@ -125,6 +132,7 @@ function createLiveSection() {
           entries.delete(userId);
         }
       });
+      updateViewer();
     } catch (err) {
       console.warn("[timeline] いま勉強中を取れませんでした", err);
     } finally {
@@ -138,7 +146,61 @@ function createLiveSection() {
     });
   }
 
-  return { section, refresh, tick };
+  /* ---- 共有されたプレビューを大きく見る ---- */
+  /** 開いている拡大表示 { userId, root, close }。refresh のたびに新しい静止画に替える */
+  let viewer = null;
+
+  /** カードのプレビューを押したら、ユーザーページへは移らずに拡大表示を開く */
+  function bindPreview(entry) {
+    const preview = entry.card.querySelector("[data-live-preview]");
+    const open = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openViewer(entry.session.user);
+    };
+    preview.addEventListener("click", open);
+    preview.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(e); });
+    // 共有が終わった直後などで画像が取れなければ、次の更新まで隠す
+    preview.querySelector("img").addEventListener("error", () => preview.classList.add("u-hidden"));
+  }
+
+  function openViewer(user) {
+    openModal({
+      title: `${user.name}さんのプレビュー`,
+      okLabel: "閉じる",
+      bodyHtml: `
+        <div class="live-viewer">
+          <img class="live-viewer__img" alt="${esc(user.name)}さんの計測中のカメラ映像" data-viewer-img>
+          <div class="live-viewer__ended u-hidden" data-viewer-ended>プレビューの共有が終わりました</div>
+        </div>
+        <div class="u-small u-muted live-viewer__meta" data-viewer-meta></div>`,
+      onMount(root, { close }) {
+        root.querySelector('[data-act="cancel"]').remove();
+        viewer = { userId: user.id, root, close };
+        updateViewer();
+      },
+    }).then(() => { viewer = null; });
+  }
+
+  function updateViewer() {
+    if (!viewer) return;
+    const session = entries.get(viewer.userId)?.session;
+    const url = session?.previewUrl;
+    const img = viewer.root.querySelector("[data-viewer-img]");
+    img.classList.toggle("u-hidden", !url);
+    viewer.root.querySelector("[data-viewer-ended]").classList.toggle("u-hidden", Boolean(url));
+    if (url && img.getAttribute("src") !== url) img.src = url;
+    const state = session && (LIVE_STATUS_LABEL[session.status]
+      || (typeof session.loc === "number" ? `LoC ${session.loc}` : "LoC計測なし"));
+    viewer.root.querySelector("[data-viewer-meta]").textContent =
+      session ? `${session.material.title}・${state}（約5秒ごとに更新）` : "";
+  }
+
+  function closeViewer() {
+    viewer?.close(false);
+  }
+
+  return { section, refresh, tick, closeViewer };
 }
 
 /** 継続時間。一時停止中でなければ、最後に届いてからの時間も足して進める */
@@ -151,6 +213,10 @@ function liveCardHtml(session) {
   const { user } = session;
   return `
     <a class="live-card" href="#/users/${user.id}">
+      <div class="live-card__preview u-hidden" data-live-preview role="button" tabindex="0"
+           aria-label="${esc(user.name)}さんのプレビューを大きく表示">
+        <img alt="" data-live-preview-img>
+      </div>
       ${gaugeHtml(0, 62, 6)}
       <div class="live-card__name">${esc(user.name)}${session.isMine ? '<span class="u-weak">（自分）</span>' : ""}</div>
       <div class="live-card__material" data-live-material></div>
@@ -172,6 +238,14 @@ function updateLiveCard(entry) {
     gauge.querySelector("[data-gauge-value]").textContent = "—";
   }
   card.classList.toggle("is-paused", session.status === "paused");
+
+  // 共有されたプレビュー（自分か相互フォローの人が共有しているときだけ URL が来る）
+  const preview = card.querySelector("[data-live-preview]");
+  const img = preview.querySelector("img");
+  const url = session.previewUrl;
+  card.classList.toggle("has-preview", Boolean(url));
+  preview.classList.toggle("u-hidden", !url);
+  if (url && img.getAttribute("src") !== url) img.src = url;
 
   card.querySelector("[data-live-material]").textContent = session.material.title;
   card.querySelector("[data-live-state]").textContent =
