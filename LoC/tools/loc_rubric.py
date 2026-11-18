@@ -224,8 +224,9 @@ BONUS_RUBRIC = (
 NEGATIVE_RUBRIC = (
     # スマホを手に持って操作している（明らかな非学習行動）
     ("phone", 1.0, lambda a: a["phone"] == "in_hand"),
-    # 机に突っ伏している（上半身が写るときだけ）
-    ("head_posture", 1.0, lambda a: a["head_posture"] == "down"),
+    # 机に突っ伏している（上半身が写るときだけ）。正面・斜めの画角では、下を向いて書く・読む
+    # 普通の姿勢まで qwen が "down" と答えるので、学習行動が見えているときは減点しない
+    ("head_posture", 1.0, lambda a: _is_slumped(a)),
     # 離席・手を引っ込めている
     ("_away", 0.8, lambda a: _is_away(a)),
     # 手はあるが筆記もデバイス操作も教材への関与もない = 止まっている
@@ -262,6 +263,26 @@ def _is_stalled(attributes: Dict[str, Any]) -> bool:
         and attributes["pen_tip_on_paper"] is not True
         and attributes["hand_on_material"] is not True
         and attributes["device_in_use"] in ("none", NOT_VISIBLE)
+    )
+
+
+def _is_slumped(attributes: Dict[str, Any]) -> bool:
+    """頭が "down" で、しかも学習行動の証拠が現在のフレームにひとつも無い（突っ伏し）。
+
+    qwen の head_posture="down" は突っ伏しのつもりの値だが、正面・斜めから撮った録画では
+    「下を向いてノートに書いている・教材を読んでいる」姿勢にも付く。2026-11-18 に推論サーバの
+    録画25本をラベリングしたところ、段階 50〜90 の評価点の30%に "down" が付き、その97%で
+    ペンを持つ等の学習行動も同時に観測されていた（目視でも大半は普通の学習姿勢）。満幅の
+    −25点がそのまま効くと新規録画のLoCが平均7点下がるため、学習行動が見えるときは減点しない。
+    本当の突っ伏しは段階判定がほぼ 10 にしているので、ここで減点しなくても捉えられる。
+    `_is_away` と同じ理由で、60秒窓の性質である writing_increased は使わない。
+    """
+    return (
+        attributes["head_posture"] == "down"
+        and attributes["pen_held"] is not True
+        and attributes["pen_tip_on_paper"] is not True
+        and attributes["hand_on_material"] is not True
+        and attributes["device_in_use"] not in ("pc", "tablet")
     )
 
 

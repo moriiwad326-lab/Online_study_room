@@ -197,6 +197,31 @@ def test_head_down_lowers_the_score():
     assert compose_loc(attrs(head_posture='down'), 50) < compose_loc(attrs(head_posture='upright'), 50)
 
 
+def test_head_down_without_learning_behaviour_is_a_full_penalty():
+    slumped = attrs(head_posture='down', hands_in_frame=0, pen_held=False, pen_tip_on_paper=False,
+                    hand_on_material=False, writing_increased=False)
+    assert compose_loc(slumped, 50) <= 50 - MAX_PENALTY
+
+
+@pytest.mark.parametrize('engaged', [
+    {'pen_held': True},
+    {'pen_tip_on_paper': True},
+    {'hand_on_material': True},
+    {'device_in_use': 'pc'},
+    {'device_in_use': 'tablet'},
+])
+def test_looking_down_while_studying_is_not_treated_as_slumped(engaged):
+    # 正面・斜めの画角では、下を向いて書く・読む姿勢にも qwen が "down" を付ける
+    nothing = dict(pen_held=False, pen_tip_on_paper=False, hand_on_material=False,
+                   writing_increased=False, device_in_use='none')
+    looking_down = loc_rubric.normalize_attributes(attrs(head_posture='down', **{**nothing, **engaged}))
+    assert not loc_rubric._is_slumped(looking_down)
+
+
+def test_writing_while_looking_down_keeps_the_level():
+    assert compose_loc(attrs(head_posture='down'), 50) >= 50
+
+
 def test_away_lowers_the_score():
     away = attrs(hands_in_frame=0, pen_held=False, hand_on_material=False,
                  pen_tip_on_paper=False, writing_increased=False)
